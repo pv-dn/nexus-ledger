@@ -747,6 +747,8 @@ function applySlipV14ToLedger(d) {
   return true;
 }
 
+const SHARED_MASTER_DOC = IS_DEMO ? "v14_demo" : "v14";
+
 function pushMastersToSlipBridge() {
   if (!IS_DEMO) return;
   try {
@@ -767,6 +769,61 @@ function pullMastersFromSlipBridge() {
     return true;
   } catch (e) {
     console.warn(e);
+    return false;
+  }
+}
+
+/** クラウド共有マスタを読む（伝票アプリと同じ Firestore） */
+async function pullSharedMastersCloud() {
+  try {
+    const snap = await getDoc(doc(db, "sharedMasters", SHARED_MASTER_DOC));
+    if (!snap.exists()) return false;
+    const raw = snap.data().value;
+    const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!d || !d.clients || !Object.keys(d.clients).length) return false;
+    applySlipV14ToLedger(d);
+    try { localStorage.setItem(BRIDGE_V14_KEY, JSON.stringify(d)); } catch {}
+    cacheLedgerMaster();
+    return true;
+  } catch (e) {
+    console.warn("pullSharedMastersCloud", e);
+    return false;
+  }
+}
+
+/** クラウド共有マスタへ書く（客先・品目。伝票側の請求系フィールドは既存を維持） */
+async function pushSharedMastersCloud() {
+  try {
+    const next = slipV14FromLedger();
+    const ref = doc(db, "sharedMasters", SHARED_MASTER_DOC);
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      try {
+        const prev = JSON.parse(snap.data().value || "{}");
+        if (prev && typeof prev === "object") {
+          next.cycles = Object.keys(next.cycles || {}).length ? next.cycles : (prev.cycles || {});
+          next.clientOrder = Object.keys(next.clientOrder || {}).length ? next.clientOrder : (prev.clientOrder || {});
+          next.closing = prev.closing || next.closing || {};
+          next.minCharge = prev.minCharge || next.minCharge || {};
+          next.deliveryFee = prev.deliveryFee || next.deliveryFee || {};
+          next.packagingFee = prev.packagingFee || next.packagingFee || {};
+          next.parkingEnabled = prev.parkingEnabled || next.parkingEnabled || {};
+          next.slipCheckedThrough = prev.slipCheckedThrough || next.slipCheckedThrough || "";
+          next.slipCheckedThroughByClosing = prev.slipCheckedThroughByClosing || next.slipCheckedThroughByClosing || {};
+          next.slipCheckedAtByClosing = prev.slipCheckedAtByClosing || next.slipCheckedAtByClosing || {};
+          next.slipIssuedAckIds = prev.slipIssuedAckIds || next.slipIssuedAckIds || {};
+        }
+      } catch {}
+    }
+    await setDoc(ref, {
+      value: JSON.stringify(next),
+      updatedAt: new Date().toISOString(),
+      updatedBy: "ledger"
+    });
+    try { localStorage.setItem(BRIDGE_V14_KEY, JSON.stringify(next)); } catch {}
+    return true;
+  } catch (e) {
+    console.warn("pushSharedMastersCloud", e);
     return false;
   }
 }
@@ -1361,26 +1418,36 @@ async function loadLedgerMaster() {
       state.prices = normalizeMasterItems(state.prices);
       syncGroupOrderFromCustomers();
       pushMastersToSlipBridge();
+      await pullSharedMastersCloud();
       return;
     }
-    if (!loadLedgerMasterFromCache()) {
-      state.customers = DEMO_CUSTOMERS.map(c => ({ ...c }));
-      state.prices = DEMO_PRICES.map(p => ({ ...p }));
-      state.groupOrder = ["グループ1", "グループ2", "グループ3"];
+    const fromCloud = await pullSharedMastersCloud();
+    if (!fromCloud) {
+      if (!loadLedgerMasterFromCache()) {
+        state.customers = DEMO_CUSTOMERS.map(c => ({ ...c }));
+        state.prices = DEMO_PRICES.map(p => ({ ...p }));
+        state.groupOrder = ["グループ1", "グループ2", "グループ3"];
+      }
     }
     fillDemoYomiIfMissing();
     state.prices = normalizeMasterItems(state.prices);
     syncGroupOrderFromCustomers();
     return;
   }
+  const shared = await pullSharedMastersCloud();
+  if (shared) return;
   let customers = await fsLoadLedger("customers");
   let items = await fsLoadLedger("items");
   let groups = await fsLoadLedger("groupOrder");
   const hasMaster = (Array.isArray(customers) && customers.length) || (Array.isArray(items) && items.length);
   if (!hasMaster) {
-    if (loadLedgerMasterFromCache()) return;
+    if (loadLedgerMasterFromCache()) {
+      await pushSharedMastersCloud();
+      return;
+    }
     await importInvoiceMasterIfEmpty();
     syncGroupOrderFromCustomers();
+    await pushSharedMastersCloud();
     return;
   }
   state.customers = Array.isArray(customers) ? customers.map(normalizeCustomer).filter(c => c.name) : [];
@@ -1388,6 +1455,7 @@ async function loadLedgerMaster() {
   state.groupOrder = normalizeGroupOrder(groups);
   syncGroupOrderFromCustomers();
   cacheLedgerMaster();
+  await pushSharedMastersCloud();
 }
 
 async function persistLedgerMaster() {
@@ -1397,14 +1465,15 @@ async function persistLedgerMaster() {
   cacheLedgerMaster();
   if (IS_DEMO) {
     pushMastersToSlipBridge();
-    return;
   }
-  if (state.demoMode) return;
-  await Promise.all([
-    fsSaveLedger("customers", state.customers),
-    fsSaveLedger("items", state.prices),
-    fsSaveLedger("groupOrder", state.groupOrder)
-  ]);
+  if (!state.demoMode) {
+    await Promise.all([
+      fsSaveLedger("customers", state.customers),
+      fsSaveLedger("items", state.prices),
+      fsSaveLedger("groupOrder", state.groupOrder)
+    ]);
+  }
+  await pushSharedMastersCloud();
 }
 
 function nextCustomerId() {

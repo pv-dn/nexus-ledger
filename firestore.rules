@@ -45,5 +45,11 @@ service cloud.firestore {
       allow update: if resource.data.status == "pending";
       allow delete: if false;
     }
+
+    // 台帳⇔伝票の客先・品目マスタ共有（仮運用でも読めるよう認証不要）
+    match /sharedMasters/{docId} {
+      allow read: if true;
+      allow write: if request.resource.data.keys().hasAll(["value", "updatedAt", "updatedBy"]);
+    }
   }
 }
