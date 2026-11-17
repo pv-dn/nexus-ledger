@@ -225,8 +225,7 @@ select,input[type=date],input[type=text]{width:100%;padding:10px 12px;border:1px
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-app.js";
 import { getFirestore, doc, getDoc, setDoc, collection, addDoc, query, orderBy, limit, getDocs, where, deleteDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
-import { getAuth, setPersistence, browserLocalPersistence, indexedDBLocalPersistence, inMemoryPersistence, signInWithEmailAndPassword, signOut, onAuthStateChanged, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-auth.js";
-import { getDatabase, ref as rtdbRef, push as rtdbPush } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-database.js";
+import { getAuth, setPersistence, browserLocalPersistence, indexedDBLocalPersistence, inMemoryPersistence, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-auth.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBRvXOmLV_iU9ybzJrquJSglUYfEON_CsM",
@@ -237,23 +236,9 @@ const firebaseConfig = {
   appId: "1:505648740877:web:f5b0c3a950866ce74bb344"
 };
 
-/** 伝票アプリ（purims）と同じ RTDB。タブレット→PC の数量受け渡し用 */
-const slipBridgeConfig = {
-  apiKey: "AIzaSyCzES3cwSCNdn0kfVtzT8BKKtJZQmUvIjg",
-  authDomain: "nexus-laundry.firebaseapp.com",
-  databaseURL: "https://nexus-laundry-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "nexus-laundry",
-  storageBucket: "nexus-laundry.firebasestorage.app",
-  messagingSenderId: "721627985179",
-  appId: "1:721627985179:web:db1066eb92e9a1633c8fbe"
-};
-
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const auth = getAuth(app);
-const slipApp = initializeApp(slipBridgeConfig, "slipBridge");
-const slipAuth = getAuth(slipApp);
-const slipRtdb = getDatabase(slipApp);
 
 const SESSION_DAY_KEY = "lg_sessionDay";
 const HISTORY_MONTHS = 2;
@@ -272,15 +257,9 @@ const LEDGERS_KEY_DEMO = `lg_ledgers_${DEMO_STORE}`;
 const BRIDGE_V14_KEY = IS_DEMO ? "purims_demo_v14" : "purims_v14";
 const BRIDGE_REV_KEY = IS_DEMO ? "purims_demo_bridge_rev" : "purims_bridge_rev";
 const BRIDGE_ISSUE_KEY = IS_DEMO ? "purims_demo_issue_pending" : "purims_issue_pending";
-/** 伝票 RTDB 上のアプリキー（デモ／本番） */
-const SLIP_FB_APP = IS_DEMO ? "purims_demo" : "purims";
+const ISSUE_PENDING_COL = IS_DEMO ? "ledgerIssuePending_demo" : "ledgerIssuePending";
 const LOT_KEY = "lg_current_lot";
 const LOT_OPTIONS = ["1","2","3","4","5","6","7","8","9","10"];
-
-async function ensureSlipBridgeAuth() {
-  if (slipAuth.currentUser) return;
-  await signInAnonymously(slipAuth);
-}
 
 function loadLotNo() {
   try {
@@ -810,15 +789,20 @@ async function issueToSlip() {
     status: "pending",
     source: "ledger"
   };
-  // 同一ブラウザ用の互換（PCで台帳と伝票を同じ端末で使う場合）
+  // 同一ブラウザ用の互換
   try { localStorage.setItem(BRIDGE_ISSUE_KEY, JSON.stringify(payload)); } catch {}
   try {
-    await ensureSlipBridgeAuth();
-    await rtdbPush(rtdbRef(slipRtdb, `${SLIP_FB_APP}/ledgerIssuePending`), payload);
+    await addDoc(collection(db, ISSUE_PENDING_COL), payload);
     toast("PCの伝票アプリへ送りました。PCでログインすると取り込まれます");
   } catch (e) {
     console.error(e);
-    toast("伝票への送信に失敗しました。ネット接続を確認してください", "error");
+    const code = e && e.code ? String(e.code) : "";
+    toast(
+      code.includes("permission")
+        ? "送信権限エラーです。管理者に Firestore ルールの反映を依頼してください"
+        : "伝票への送信に失敗しました。ネット接続を確認してください",
+      "error"
+    );
   }
 }
 /** @deprecated 旧名互換 */
