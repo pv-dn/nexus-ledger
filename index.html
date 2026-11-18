@@ -224,7 +224,7 @@ select,input[type=date],input[type=text]{width:100%;padding:10px 12px;border:1px
 <div id="root"><div class="login-wrap"><div class="login-card"><h1>入出荷台帳</h1><p>読込中…</p></div></div></div>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-app.js";
-import { getFirestore, doc, getDoc, setDoc, collection, addDoc, query, orderBy, limit, getDocs, where, deleteDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
+import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, getDoc, setDoc, collection, addDoc, query, orderBy, limit, getDocs, where, deleteDoc } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
 import { getAuth, setPersistence, browserLocalPersistence, indexedDBLocalPersistence, inMemoryPersistence, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.13.0/firebase-auth.js";
 
 const firebaseConfig = {
@@ -237,7 +237,10 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
+// ネットが切れている間の書き込み（伝票への送信など）を端末に保存し、つながったら自動で送る
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+});
 const auth = getAuth(app);
 
 const SESSION_DAY_KEY = "lg_sessionDay";
@@ -358,7 +361,7 @@ function bindInstallButtons() {
 
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
-  const run = () => navigator.serviceWorker.register("./sw.js?v=22", { updateViaCache: "none" }).catch(() => {});
+  const run = () => navigator.serviceWorker.register("./sw.js?v=23", { updateViaCache: "none" }).catch(() => {});
   if ("requestIdleCallback" in window) requestIdleCallback(run, { timeout: 5000 });
   else setTimeout(run, 3000);
 }
@@ -848,9 +851,14 @@ async function issueToSlip() {
   };
   // 同一ブラウザ用の互換
   try { localStorage.setItem(BRIDGE_ISSUE_KEY, JSON.stringify(payload)); } catch {}
+  const offlineNow = !navigator.onLine;
+  if (offlineNow) {
+    toast("ネットが切れています。つながったら自動で伝票へ送ります（送信待ち）", "error");
+  }
   try {
+    // 端末に保存済みなら、つながった時点で自動送信される（完了はサーバー確認後）
     await addDoc(collection(db, ISSUE_PENDING_COL), payload);
-    toast("PCの伝票アプリへ送りました。PCでログインすると取り込まれます");
+    toast(offlineNow ? "ネットが戻り、伝票へ送信しました" : "PCの伝票アプリへ送りました。PCでログインすると取り込まれます");
   } catch (e) {
     console.error(e);
     const code = e && e.code ? String(e.code) : "";
@@ -864,6 +872,9 @@ async function issueToSlip() {
 }
 /** @deprecated 旧名互換 */
 function issueToSlipDemo() { return issueToSlip(); }
+// ネットの切れ・戻りを知らせる（送信待ちは端末に残り、戻ったら自動で送られる）
+window.addEventListener("offline", () => toast("ネットが切れました。伝票への送信は端末に保存され、戻ったら自動で送ります", "error"));
+window.addEventListener("online", () => toast("ネットに戻りました"));
 
 const ZOOM_KEY = "lg_itemZoom";
 const ZOOM_MIN = 0.7;

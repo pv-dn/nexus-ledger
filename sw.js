@@ -1,4 +1,4 @@
-const CACHE_NAME = "pourvous-ledger-v31";
+const CACHE_NAME = "pourvous-ledger-v32";
 const SHELL = [
   "./index.html",
   "./guide.html",
@@ -35,7 +35,8 @@ function isHtml(url) {
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   const url = new URL(event.request.url);
-  if (url.origin !== self.location.origin) return;
+  const isFirebaseCdn = url.hostname === "www.gstatic.com";
+  if (url.origin !== self.location.origin && !isFirebaseCdn) return;
 
   // HTMLは常にネットワーク優先（古い台帳レイアウトが残らないように）
   if (isNavigation(event.request) || isHtml(url)) {
@@ -49,6 +50,21 @@ self.addEventListener("fetch", event => {
           return response;
         })
         .catch(() => caches.match("./index.html"))
+    );
+    return;
+  }
+
+  // Firebase の部品（gstatic）はオフラインでも読めるようキャッシュ優先で保存
+  // （無いとネットが切れた状態で開き直すと、画面の読み込みが止まるため）
+  if (isFirebaseCdn) {
+    event.respondWith(
+      caches.match(event.request).then(hit => hit || fetch(event.request).then(response => {
+        if (response.ok) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+        }
+        return response;
+      }))
     );
     return;
   }
