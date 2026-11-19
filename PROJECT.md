@@ -1,8 +1,8 @@
-# 入出荷台帳（pourvous-ledger）
+# 入出荷台帳（nexus-ledger）
 
 | 項目 | 内容 |
 |------|------|
-| **ID** | `pourvous-ledger` |
+| **ID** | `nexus-ledger` |
 | **呼び名** | 入出荷台帳 |
 | **フォルダ** | `C:\Users\e--yo\Apps\入出荷台帳` |
 | **会社** | 株式会社プゥル・ヴー（ホワイト事業部） |
@@ -61,11 +61,11 @@
 
 ## 本番 URL
 
-https://pv-dn.github.io/pourvous-ledger/
+https://pv-dn.github.io/nexus-ledger/
 
 ## リポジトリ
 
-https://github.com/pv-dn/pourvous-ledger
+https://github.com/pv-dn/nexus-ledger
 
 ## 同時利用
 
@@ -100,7 +100,7 @@ firebase deploy --only firestore:rules --project pourvoussystem
 ```powershell
 cd "C:\Users\e--yo\Apps\入出荷台帳"
 git init
-git remote add origin https://github.com/pv-dn/pourvous-ledger.git
+git remote add origin https://github.com/pv-dn/nexus-ledger.git
 git add index.html manifest.webmanifest README.md PROJECT.md .gitignore
 git commit -m "入出荷台帳 初回"
 git push -u origin main

@@ -22,8 +22,8 @@
 
 ## 起動
 
-- 本番: https://pv-dn.github.io/pourvous-ledger/
-- ガイド（印刷用）: https://pv-dn.github.io/pourvous-ledger/guide.html
+- 本番: https://pv-dn.github.io/nexus-ledger/
+- ガイド（印刷用）: https://pv-dn.github.io/nexus-ledger/guide.html
 - 開発: `index.html`（localhost では試用モード）
 
 ## Cursor
