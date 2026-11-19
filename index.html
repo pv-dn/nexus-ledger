@@ -826,11 +826,34 @@ async function pullSharedMastersCloud() {
 }
 
 /** クラウド共有マスタへ書く（客先・品目。伝票側の請求系フィールドは既存を維持） */
+/** 台帳が持たない客先の詳細（symbol・品目の単価など）を、共有マスタの既存値から引き継ぐ */
+function carryClientDetails(next, prev) {
+  const prevClients = prev && prev.clients && typeof prev.clients === "object" ? prev.clients : {};
+  for (const [name, cl] of Object.entries(next.clients || {})) {
+    const pc = prevClients[name];
+    if (!pc || typeof pc !== "object") continue;
+    for (const k of Object.keys(pc)) {
+      if (k === "items" || k === "_keep" || k === "__empty") continue;
+      if (!(k in cl)) cl[k] = pc[k];
+    }
+    const prevItems = Array.isArray(pc.items) ? pc.items : [];
+    cl.items = (cl.items || []).map(it => {
+      const pi = prevItems.find(x => x && it.code && x.code === it.code)
+        || prevItems.find(x => x && x.name === it.name);
+      return pi ? { ...pi, ...it } : it;
+    });
+  }
+}
+
 async function pushSharedMastersCloud() {
   try {
     const next = slipV14FromLedger();
     const ref = doc(db, "sharedMasters", SHARED_MASTER_DOC);
     const snap = await getDoc(ref);
+    // 新規客先の目印（伝票アプリでお知らせを出すため）。伝票側が「設定済み」にすると消える
+    const existingNew = snap.exists() && snap.data().newClients && typeof snap.data().newClients === "object"
+      ? snap.data().newClients : {};
+    const newClients = { ...existingNew };
     if (snap.exists()) {
       try {
         const prev = JSON.parse(snap.data().value || "{}");
@@ -846,13 +869,25 @@ async function pushSharedMastersCloud() {
           next.slipCheckedThroughByClosing = prev.slipCheckedThroughByClosing || next.slipCheckedThroughByClosing || {};
           next.slipCheckedAtByClosing = prev.slipCheckedAtByClosing || next.slipCheckedAtByClosing || {};
           next.slipIssuedAckIds = prev.slipIssuedAckIds || next.slipIssuedAckIds || {};
+          carryClientDetails(next, prev);
+          const prevNames = prev.clients && typeof prev.clients === "object" ? Object.keys(prev.clients) : [];
+          if (prevNames.length) {
+            const at = new Date().toISOString();
+            for (const name of Object.keys(next.clients || {})) {
+              if (!prev.clients[name] && !newClients[name]) newClients[name] = at;
+            }
+          }
         }
       } catch {}
+    }
+    for (const name of Object.keys(newClients)) {
+      if (!next.clients || !next.clients[name]) delete newClients[name];
     }
     await setDoc(ref, {
       value: JSON.stringify(next),
       updatedAt: new Date().toISOString(),
-      updatedBy: "ledger"
+      updatedBy: "ledger",
+      newClients
     });
     try { localStorage.setItem(BRIDGE_V14_KEY, JSON.stringify(next)); } catch {}
     return true;
