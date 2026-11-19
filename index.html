@@ -73,7 +73,8 @@ select,input[type=date],input[type=text]{width:100%;padding:10px 12px;border:1px
 #master-item-query,#item-add-query,#master-form-search-query,#item-add-name,#item-add-yomi{background:#eef8f1;border-color:#9ecbb0;color:#1a3a28}
 #master-form-name,#master-form-yomi,#master-form-code,#master-form-group{background:#f7fafc;border-color:#9fc4de}
 .meta-row{display:grid;grid-template-columns:1.4fr 1fr 0.7fr;gap:10px}
-@media (max-width:900px){.meta-row{grid-template-columns:1fr 1fr}}
+.meta-row.has-group{grid-template-columns:0.9fr 1.5fr 1fr 0.7fr}
+@media (max-width:900px){.meta-row{grid-template-columns:1fr 1fr}.meta-row.has-group{grid-template-columns:1fr 1fr}}
 #lot-select{background:#fff8e8;border-color:#e0c070;color:#5a4010;font-weight:700}
 .item-list{display:flex;flex-direction:column;gap:0}
 .items-panel{display:flex;flex-direction:column;flex:1;min-height:0;gap:3px;--iz:1}
@@ -455,6 +456,35 @@ function renderCustomerSelectOptions(selected = "") {
       `<option value="${esc(c.name)}"${selected === c.name ? " selected" : ""}>${esc(c.name)}</option>`
     ).join("")}</optgroup>`
   ).join("");
+}
+
+/** 入力画面用：グループで絞った客先の選択肢（group が空なら全件） */
+function renderCustomerSelectOptionsForGroup(selected = "", group = "") {
+  if (!group) return renderCustomerSelectOptions(selected);
+  const found = customersGrouped().find(g => g.group === group);
+  const list = found ? found.customers : [];
+  const opts = list.map(c =>
+    `<option value="${esc(c.name)}"${selected === c.name ? " selected" : ""}>${esc(c.name)}</option>`
+  );
+  // 選択中の客先が別グループでも、表示が空にならないよう先頭に残す
+  if (selected && !list.some(c => c.name === selected)) {
+    opts.unshift(`<option value="${esc(selected)}" selected>${esc(selected)}</option>`);
+  }
+  return opts.join("");
+}
+
+/** 入力画面用：グループ選択肢（先頭は「すべて」） */
+function renderCustomerGroupOptions(current = "") {
+  const groups = customersGrouped().map(g => g.group);
+  return `<option value="">すべて</option>` + groups.map(g =>
+    `<option value="${esc(g)}"${current === g ? " selected" : ""}>${esc(g)}</option>`
+  ).join("");
+}
+
+/** 客先が属するグループ名（未登録なら空） */
+function groupOfCustomer(name) {
+  const c = state.customers.find(x => x.name === name);
+  return c ? customerGroupName(c) : "";
 }
 
 async function moveCustomer(name, dir) {
@@ -1057,6 +1087,7 @@ const state = {
   masterItemZoom: loadMasterItemZoom(),
   masterForm: null,
   groupOrder: [],
+  custGroup: null, // 入力画面で選んでいるグループ（null=未設定→客先から決める、""=すべて）
 };
 
 function isActiveSession() {
@@ -1733,6 +1764,7 @@ function selectCustomer(name) {
     render();
     return;
   }
+  state.custGroup = groupOfCustomer(name); // 客先のグループに合わせる
   loadCustomerItems(name);
   render();
 }
@@ -1968,9 +2000,11 @@ function numpadPress(key) {
   }
   render();
   if (state.focus) {
+    // 連打されると rAF の時点で focus が null になっていることがあるので、値を先に控える
+    const f = state.focus;
     requestAnimationFrame(() => {
       const el = document.querySelector(
-        `.qty-cell[data-i="${state.focus.index}"][data-f="${state.focus.field}"]`
+        `.qty-cell[data-i="${f.index}"][data-f="${f.field}"]`
       );
       el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     });
@@ -2143,7 +2177,15 @@ function renderItemRow(it, i) {
 }
 
 function renderInputTab() {
-  const custOpts = renderCustomerSelectOptions(state.customer);
+  const groupsAll = customersGrouped();
+  const hasNamedGroup = groupsAll.some(g => g.group !== UNGROUPED_LABEL);
+  if (state.custGroup === null) state.custGroup = groupOfCustomer(state.customer);
+  if (state.custGroup && !groupsAll.some(g => g.group === state.custGroup)) state.custGroup = "";
+  const activeGroup = hasNamedGroup ? state.custGroup : "";
+  const custOpts = renderCustomerSelectOptionsForGroup(state.customer, activeGroup);
+  const groupField = hasNamedGroup ? `
+          <div><label class="lbl">グループ</label>
+            <select id="cust-group-select">${renderCustomerGroupOptions(activeGroup)}</select></div>` : "";
   const layout = itemLayoutMeta();
   const headUnit = `<div class="list-head-unit"><span>品名</span><span>数量</span></div>`;
 
@@ -2164,7 +2206,7 @@ function renderInputTab() {
   return `
     <div class="input-layout">
       <div class="card input-fixed">
-        <div class="meta-row">
+        <div class="meta-row${hasNamedGroup ? " has-group" : ""}">${groupField}
           <div><label class="lbl">客先</label>
             <select id="cust-select"><option value="">-- 選択 --</option>${custOpts}</select></div>
           <div><label class="lbl">納品日</label>
@@ -2629,6 +2671,8 @@ function render() {
   if (state.tab === 0 && !state.loading) {
     const sel = document.getElementById("cust-select");
     if (sel) sel.onchange = e => selectCustomer(e.target.value);
+    const gsel = document.getElementById("cust-group-select");
+    if (gsel) gsel.onchange = e => { state.custGroup = e.target.value; render(); };
     const dt = document.getElementById("delivery-date");
     if (dt) dt.onchange = e => { state.deliveryDate = e.target.value; };
     if (!state.deliveryDate) state.deliveryDate = dt?.value || todayInput();
