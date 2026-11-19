@@ -250,7 +250,8 @@ const MASTER_CUST_KEY = "lg_master_customers";
 const MASTER_ITEMS_KEY = "lg_master_items";
 const MASTER_GROUP_KEY = "lg_master_groups";
 // デモURL: https://pv-dn.github.io/primus-ledger-demo/（旧: purims-ledger-demo も可）
-const IS_DEMO = /\/(?:primus|purims)-ledger-demo(\/|$)/i.test(location.pathname) || /(?:^|[?&])demo=1(?:&|$)/.test(location.search);
+// デモ運用は終了（デモ用の保存先・入口は使わない）。本番の動きは変えない。
+const IS_DEMO = false;
 /** お試しURLは trial、仮運用/ローカル試用は demo（本番クラウドと分離） */
 const DEMO_STORE = IS_DEMO ? "trial" : "demo";
 const MASTER_CUST_KEY_DEMO = `lg_master_customers_${DEMO_STORE}`;

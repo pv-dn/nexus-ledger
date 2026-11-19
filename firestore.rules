@@ -38,14 +38,6 @@ service cloud.firestore {
       allow update: if resource.data.status == "pending";
       allow delete: if false;
     }
-    match /ledgerIssuePending_demo/{docId} {
-      allow create: if request.resource.data.status == "pending"
-        && request.resource.data.keys().hasAll(["client", "deliveryDate", "lotNo", "items", "at", "status", "source"]);
-      allow read: if true;
-      allow update: if resource.data.status == "pending";
-      allow delete: if false;
-    }
-
     // 台帳⇔伝票の客先・品目マスタ共有（仮運用でも読めるよう認証不要）
     match /sharedMasters/{docId} {
       allow read: if true;
