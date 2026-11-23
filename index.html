@@ -1579,7 +1579,7 @@ function searchItemsForMasterAdd(customer, q = "", kanaRow = "all") {
   return hits.slice(0, 50);
 }
 
-/** 客先品目一覧の絞り込み（元の index を保持） */
+/** 客先品目一覧の絞り込み（元の index＝保存順を保持。並べ替え用） */
 function filterCustomerItemsWithIndex(customer, q = "", kanaRow = "all") {
   const rows = customerItemRows(customer);
   const query = normalizeItemName(q);
@@ -1604,13 +1604,45 @@ function filterCustomerItemsWithIndex(customer, q = "", kanaRow = "all") {
     }
     out.push({ p, index });
   });
-  out.sort((a, b) => {
-    const ay = itemYomiSortKey(a.p);
-    const by = itemYomiSortKey(b.p);
-    if (ay !== by) return ay < by ? -1 : 1;
-    return normalizeItemName(a.p.name) < normalizeItemName(b.p.name) ? -1 : 1;
-  });
+  // 表示・入力とも保存順（並べ替え結果）をそのまま使う。読み順ソートはしない
   return out;
+}
+
+function masterItemReorderEnabled() {
+  const q = (state.masterItemQuery || "").trim();
+  const row = String(state.masterItemKanaRow || "all");
+  return !q && (!row || row === "all");
+}
+
+/** 客先内の品目を1つ上下に移動して保存（入力画面の並びにも反映） */
+async function moveMasterItem(customer, index, dir) {
+  if (!canMasterFullEdit()) return;
+  if (!customer) return;
+  if (!masterItemReorderEnabled()) {
+    toast("並べ替えは検索を空にしてから行ってください", "error");
+    return;
+  }
+  const indices = [];
+  state.prices.forEach((p, i) => {
+    if (p.customer === customer) indices.push(i);
+  });
+  const from = index;
+  const to = index + dir;
+  if (from < 0 || to < 0 || from >= indices.length || to >= indices.length) return;
+  const customerItems = indices.map(i => state.prices[i]);
+  const [moved] = customerItems.splice(from, 1);
+  customerItems.splice(to, 0, moved);
+  const firstIdx = indices[0];
+  state.prices = state.prices.filter(p => p.customer !== customer);
+  state.prices.splice(firstIdx, 0, ...customerItems);
+  if (state.customer === customer) loadCustomerItems(customer);
+  try {
+    await persistLedgerMaster();
+    render();
+  } catch (e) {
+    console.error(e);
+    toast("並び替えに失敗しました", "error");
+  }
 }
 
 async function importInvoiceMasterIfEmpty() {
@@ -2596,17 +2628,24 @@ function renderMasterTab() {
     ? filterCustomerItemsWithIndex(masterCust, state.masterItemQuery, state.masterItemKanaRow)
     : [];
   const totalItems = masterCust ? customerItemRows(masterCust).length : 0;
-  const itemRows = filteredItems.map(({ p, index }) => `
+  const canReorderItems = fullEdit && masterItemReorderEnabled();
+  const itemRows = filteredItems.map(({ p, index }) => {
+    const canUp = canReorderItems && index > 0;
+    const canDown = canReorderItems && index < totalItems - 1;
+    return `
     <div class="master-row">
       <div class="master-row-body">
         <div class="master-row-title">${esc(p.name)}</div>
         <div class="master-row-meta">${p.yomi ? `読み ${esc(p.yomi)} · ` : ""}${p.code ? `コード ${esc(p.code)}` : "コードなし"}</div>
       </div>
       ${fullEdit ? `<div class="master-row-actions">
+        <button type="button" class="master-btn master-btn-move" data-master-move-item="${index}" data-dir="-1" ${canUp ? "" : "disabled"} aria-label="上へ">↑</button>
+        <button type="button" class="master-btn master-btn-move" data-master-move-item="${index}" data-dir="1" ${canDown ? "" : "disabled"} aria-label="下へ">↓</button>
         <button type="button" class="master-btn master-btn-edit" data-master-edit-item="${index}">編集</button>
         <button type="button" class="master-btn master-btn-del" data-master-del-item="${index}">削除</button>
       </div>` : ""}
-    </div>`).join("");
+    </div>`;
+  }).join("");
   const kanaOpts = KANA_ROW_OPTIONS.filter(r => r.key !== "").map(r =>
     `<option value="${esc(r.key)}" ${state.masterItemKanaRow === r.key ? "selected" : ""}>${esc(r.label)}</option>`
   ).join("");
@@ -2662,7 +2701,7 @@ function renderMasterTab() {
           <button type="button" class="btn-mzoom" id="master-zoom-in" aria-label="拡大" ${state.masterItemZoom >= ZOOM_MAX ? "disabled" : ""}>＋</button>
         </div>
       </div>
-      <p class="sync-note" style="margin:0 0 8px">${totalItems ? `${filteredItems.length} / ${totalItems} 件` : "品目なし"} · 読み仮名順 · ${state.masterItemCols}列</p>
+      <p class="sync-note" style="margin:0 0 8px">${totalItems ? `${filteredItems.length} / ${totalItems} 件` : "品目なし"} · ${canReorderItems ? "↑↓で並べ替え（入力画面にも反映）" : "並べ替えは検索を空にしてから"} · ${state.masterItemCols}列</p>
       <button type="button" class="master-add" id="master-add-item" ${state.customers.length ? "" : "disabled"}>＋ 品目を追加</button>
       <div class="master-list cols" style="margin-top:10px;--master-cols:${state.masterItemCols};--mz:${state.masterItemZoom}">${itemRows || `<div class="empty master-empty" style="padding:24px">${esc(itemEmptyMsg)}</div>`}</div>`;
   }
@@ -3117,6 +3156,9 @@ function render() {
     });
     document.querySelectorAll("[data-master-del-item]").forEach(btn => {
       btn.onclick = () => deleteMasterItem(state.masterCustomer, +btn.dataset.masterDelItem);
+    });
+    document.querySelectorAll("[data-master-move-item]").forEach(btn => {
+      btn.onclick = () => moveMasterItem(state.masterCustomer, +btn.dataset.masterMoveItem, +btn.dataset.dir);
     });
   }
 
