@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="入出荷台帳">
-<meta name="theme-color" content="#4FC3F7">
+<meta name="theme-color" content="#0288D1">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
@@ -21,10 +21,16 @@ body{font-family:"Noto Sans JP",-apple-system,sans-serif;background:#f4f3ef;colo
 .hidden{display:none!important}
 .app{max-width:none;width:100%;height:100%;margin:0 auto;display:flex;flex-direction:column;overflow:hidden}
 .demo-banner{background:#b45309;color:#fff;text-align:center;padding:8px 12px;font-size:13px;font-weight:700;letter-spacing:.02em;flex-shrink:0}
-.header{background:#4FC3F7;color:#fff;padding:calc(8px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1));display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0;z-index:30}
+.header{background:#0288D1;color:#fff;padding:calc(8px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1));display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0;z-index:30}
 .header-brand{flex-shrink:0;min-width:0}
 .header h1{font-size:calc(16px * var(--ui-scale, 1));font-weight:700}
 .header-sub{font-size:calc(11px * var(--ui-scale, 1));opacity:.85;margin-top:2px}
+.pc-link-badge{display:inline-flex;align-items:center;gap:5px;margin-top:4px;padding:2px 8px;border-radius:999px;font-size:calc(10px * var(--ui-scale, 1));font-weight:700;letter-spacing:.02em;line-height:1.3;background:rgba(255,255,255,.22);color:#fff;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-link-badge::before{content:"";width:7px;height:7px;border-radius:50%;background:#b9f6ca;box-shadow:0 0 0 2px rgba(185,246,202,.35);flex-shrink:0}
+.pc-link-badge.off{background:rgba(183,28,28,.35)}
+.pc-link-badge.off::before{background:#ffcdd2;box-shadow:0 0 0 2px rgba(255,205,210,.35)}
+.pc-link-badge.demo{background:rgba(255,255,255,.18)}
+.pc-link-badge.demo::before{background:#ffe082;box-shadow:0 0 0 2px rgba(255,224,130,.35)}
 .header-tabs{display:flex;align-items:center;gap:4px;flex:1;min-width:0;justify-content:center}
 .header-tab{border:none;border-radius:8px;padding:calc(8px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1));background:rgba(255,255,255,.22);color:#fff;font-size:calc(13px * var(--ui-scale, 1));font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap}
 .header-tab.active{background:#fff;color:#0288D1}
@@ -380,8 +386,63 @@ function normalizeCustomer(c) {
   return {
     id: c?.id || "",
     name: (c?.name || "").trim(),
-    group: (c?.group || "").trim()
+    group: (c?.group || "").trim(),
+    symbol: (c?.symbol || "").trim()
   };
+}
+
+function customerOptionLabel(c) {
+  const name = (c?.name || "").trim();
+  const sym = (c?.symbol || "").trim();
+  return sym ? `${name}（${sym}）` : name;
+}
+
+function symbolOfCustomer(name) {
+  const c = state.customers.find(x => x.name === name);
+  return (c?.symbol || "").trim();
+}
+
+function cycleOfCustomer(name) {
+  return ((state.cycles || {})[name] || "").trim();
+}
+
+/**
+ * サイクル文字列（例: 月木）から、入力日の「次の」サイクル日を計算。
+ * 入力日そのものがサイクル日でも、その日は使わず次の回にする。
+ */
+function nxtDel(cyc, fromDate = new Date()) {
+  if (!cyc) return null;
+  const m = { 月: 1, 火: 2, 水: 3, 木: 4, 金: 5, 土: 6, 日: 0 };
+  const base = new Date(fromDate.getFullYear(), fromDate.getMonth(), fromDate.getDate());
+  const tw = base.getDay();
+  let min = 99;
+  for (const ch of cyc) {
+    if (m[ch] === undefined) continue;
+    let d = (m[ch] - tw + 7) % 7;
+    if (d === 0) d = 7; // 当日はスキップして次のサイクル日へ
+    if (d < min) min = d;
+  }
+  if (min === 99) return null;
+  const r = new Date(base);
+  r.setDate(r.getDate() + min);
+  return r;
+}
+
+function dateToInput(d) {
+  if (!d || isNaN(d)) return "";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** 客先選択時：納品サイクルがあれば次の納品日を自動セット */
+function applyCycleDeliveryDate(name) {
+  const next = nxtDel(cycleOfCustomer(name));
+  if (next) {
+    state.deliveryDate = dateToInput(next);
+    state.deliveryDateFromCycle = true;
+  } else {
+    if (!state.deliveryDate) state.deliveryDate = todayInput();
+    state.deliveryDateFromCycle = false;
+  }
 }
 
 function customerGroupName(c) {
@@ -449,12 +510,12 @@ function renderCustomerSelectOptions(selected = "") {
   const hasNamedGroup = groups.some(g => g.group !== UNGROUPED_LABEL);
   if (!hasNamedGroup) {
     return state.customers.map(c =>
-      `<option value="${esc(c.name)}"${selected === c.name ? " selected" : ""}>${esc(c.name)}</option>`
+      `<option value="${esc(c.name)}"${selected === c.name ? " selected" : ""}>${esc(customerOptionLabel(c))}</option>`
     ).join("");
   }
   return groups.map(({ group, customers }) =>
     `<optgroup label="${esc(group)}">${customers.map(c =>
-      `<option value="${esc(c.name)}"${selected === c.name ? " selected" : ""}>${esc(c.name)}</option>`
+      `<option value="${esc(c.name)}"${selected === c.name ? " selected" : ""}>${esc(customerOptionLabel(c))}</option>`
     ).join("")}</optgroup>`
   ).join("");
 }
@@ -465,11 +526,12 @@ function renderCustomerSelectOptionsForGroup(selected = "", group = "") {
   const found = customersGrouped().find(g => g.group === group);
   const list = found ? found.customers : [];
   const opts = list.map(c =>
-    `<option value="${esc(c.name)}"${selected === c.name ? " selected" : ""}>${esc(c.name)}</option>`
+    `<option value="${esc(c.name)}"${selected === c.name ? " selected" : ""}>${esc(customerOptionLabel(c))}</option>`
   );
   // 選択中の客先が別グループでも、表示が空にならないよう先頭に残す
   if (selected && !list.some(c => c.name === selected)) {
-    opts.unshift(`<option value="${esc(selected)}" selected>${esc(selected)}</option>`);
+    const orphan = state.customers.find(c => c.name === selected) || { name: selected };
+    opts.unshift(`<option value="${esc(selected)}" selected>${esc(customerOptionLabel(orphan))}</option>`);
   }
   return opts.join("");
 }
@@ -580,64 +642,64 @@ async function deleteMasterGroup(name) {
 }
 
 const DEMO_PRICES = [
-  { customer: "客先A", code: "N001", name: "作業着（上）", yomi: "さぎょうぎうえ" },
-  { customer: "客先A", code: "N002", name: "作業着（下）", yomi: "さぎょうぎした" },
-  { customer: "客先A", code: "N003", name: "エプロン（短）", yomi: "えぷろんみじか" },
-  { customer: "客先A", code: "N004", name: "エプロン（長）", yomi: "えぷろんなが" },
-  { customer: "客先A", code: "N005", name: "タオル（大）", yomi: "たおるだい" },
-  { customer: "客先A", code: "N006", name: "タオル（中）", yomi: "たおるちゅう" },
-  { customer: "客先A", code: "N007", name: "タオル（小）", yomi: "たおるしょう" },
-  { customer: "客先A", code: "N008", name: "手袋", yomi: "てぶくろ" },
-  { customer: "客先A", code: "N009", name: "帽子", yomi: "ぼうし" },
-  { customer: "客先A", code: "N010", name: "マスク", yomi: "ますく" },
-  { customer: "客先A", code: "N011", name: "白衣（上）", yomi: "はくいうえ" },
-  { customer: "客先A", code: "N012", name: "白衣（下）", yomi: "はくいした" },
-  { customer: "客先A", code: "N013", name: "ベスト", yomi: "べすと" },
-  { customer: "客先A", code: "N014", name: "防寒ジャンパー", yomi: "ぼうかんじゃんぱー" },
-  { customer: "客先A", code: "N015", name: "ズボン", yomi: "ずぼん" },
-  { customer: "客先A", code: "N016", name: "シャツ（半袖）", yomi: "しゃつはんそで" },
-  { customer: "客先A", code: "N017", name: "シャツ（長袖）", yomi: "しゃつながそで" },
-  { customer: "客先A", code: "N018", name: "ポロシャツ", yomi: "ぽろしゃつ" },
-  { customer: "客先A", code: "N019", name: "クリーニングバッグ", yomi: "くりーにんぐばっぐ" },
-  { customer: "客先A", code: "N020", name: "ネーム札", yomi: "ねーむふだ" },
-  { customer: "客先A", code: "N021", name: "腕章", yomi: "わんしょう" },
-  { customer: "客先A", code: "N022", name: "腰巻き", yomi: "こしまき" },
-  { customer: "客先A", code: "N023", name: "三角巾", yomi: "さんかくきん" },
-  { customer: "客先A", code: "N024", name: "靴下", yomi: "くつした" },
-  { customer: "客先A", code: "N025", name: "軍手", yomi: "ぐんて" },
-  { customer: "客先B", code: "N001", name: "コックコート", yomi: "こっくこーと" },
-  { customer: "客先B", code: "N002", name: "前掛け（短）", yomi: "まえかけみじか" },
-  { customer: "客先B", code: "N003", name: "前掛け（長）", yomi: "まえかけなが" },
-  { customer: "客先B", code: "N004", name: "ナプキン", yomi: "なぷきん" },
-  { customer: "客先B", code: "N005", name: "テーブルクロス", yomi: "てーぶるくろす" },
-  { customer: "客先B", code: "N006", name: "ランチョンマット", yomi: "らんちょんまっと" },
-  { customer: "客先B", code: "N007", name: "座席カバー", yomi: "ざせきかばー" },
-  { customer: "客先B", code: "N008", name: "厨房タオル", yomi: "ちゅうぼうたおる" },
-  { customer: "客先B", code: "N009", name: "ダスター", yomi: "だすたー" },
-  { customer: "客先B", code: "N010", name: "三角巾", yomi: "さんかくきん" },
-  { customer: "客先B", code: "N011", name: "ハンバーガー帽", yomi: "はんばーがーぼう" },
-  { customer: "客先B", code: "N012", name: "ホールエプロン", yomi: "ほーるえぷろん" },
-  { customer: "客先B", code: "N013", name: "バンダナ", yomi: "ばんだな" },
-  { customer: "客先B", code: "N014", name: "ふきん", yomi: "ふきん" },
-  { customer: "客先B", code: "N015", name: "厨房靴", yomi: "ちゅうぼうぐつ" },
-  { customer: "客先C", code: "N001", name: "患者着（上）", yomi: "かんじゃぎうえ" },
-  { customer: "客先C", code: "N002", name: "患者着（下）", yomi: "かんじゃぎした" },
-  { customer: "客先C", code: "N003", name: "看護師白衣", yomi: "かんごしはくい" },
-  { customer: "客先C", code: "N004", name: "看護師ズボン", yomi: "かんごしずぼん" },
-  { customer: "客先C", code: "N005", name: "スクラブ（上）", yomi: "すくらぶうえ" },
-  { customer: "客先C", code: "N006", name: "スクラブ（下）", yomi: "すくらぶした" },
-  { customer: "客先C", code: "N007", name: "ガウン", yomi: "がうん" },
-  { customer: "客先C", code: "N008", name: "シーツ（シングル）", yomi: "しーつしんぐる" },
-  { customer: "客先C", code: "N009", name: "シーツ（ダブル）", yomi: "しーつだぶる" },
-  { customer: "客先C", code: "N010", name: "枕カバー", yomi: "まくらかばー" },
-  { customer: "客先C", code: "N011", name: "バスタオル", yomi: "ばすたおる" },
-  { customer: "客先C", code: "N012", name: "フェイスタオル", yomi: "ふぇいすたおる" },
-  { customer: "客先C", code: "N013", name: "バスマット", yomi: "ばすまっと" },
-  { customer: "客先C", code: "N014", name: "カーテン", yomi: "かーてん" },
-  { customer: "客先C", code: "N015", name: "オペ着", yomi: "おぺぎ" },
-  { customer: "客先C", code: "N016", name: "帽子（手術用）", yomi: "ぼうししゅじゅつよう" },
-  { customer: "客先C", code: "N017", name: "マスク（使い捨て）", yomi: "ますくつかいすて" },
-  { customer: "客先C", code: "N018", name: "足袋", yomi: "たび" }
+  { customer: "客先A", code: "P001", name: "作業着（上）", yomi: "さぎょうぎうえ" },
+  { customer: "客先A", code: "P002", name: "作業着（下）", yomi: "さぎょうぎした" },
+  { customer: "客先A", code: "P003", name: "エプロン（短）", yomi: "えぷろんみじか" },
+  { customer: "客先A", code: "P004", name: "エプロン（長）", yomi: "えぷろんなが" },
+  { customer: "客先A", code: "P005", name: "タオル（大）", yomi: "たおるだい" },
+  { customer: "客先A", code: "P006", name: "タオル（中）", yomi: "たおるちゅう" },
+  { customer: "客先A", code: "P007", name: "タオル（小）", yomi: "たおるしょう" },
+  { customer: "客先A", code: "P008", name: "手袋", yomi: "てぶくろ" },
+  { customer: "客先A", code: "P009", name: "帽子", yomi: "ぼうし" },
+  { customer: "客先A", code: "P010", name: "マスク", yomi: "ますく" },
+  { customer: "客先A", code: "P011", name: "白衣（上）", yomi: "はくいうえ" },
+  { customer: "客先A", code: "P012", name: "白衣（下）", yomi: "はくいした" },
+  { customer: "客先A", code: "P013", name: "ベスト", yomi: "べすと" },
+  { customer: "客先A", code: "P014", name: "防寒ジャンパー", yomi: "ぼうかんじゃんぱー" },
+  { customer: "客先A", code: "P015", name: "ズボン", yomi: "ずぼん" },
+  { customer: "客先A", code: "P016", name: "シャツ（半袖）", yomi: "しゃつはんそで" },
+  { customer: "客先A", code: "P017", name: "シャツ（長袖）", yomi: "しゃつながそで" },
+  { customer: "客先A", code: "P018", name: "ポロシャツ", yomi: "ぽろしゃつ" },
+  { customer: "客先A", code: "P019", name: "クリーニングバッグ", yomi: "くりーにんぐばっぐ" },
+  { customer: "客先A", code: "P020", name: "ネーム札", yomi: "ねーむふだ" },
+  { customer: "客先A", code: "P021", name: "腕章", yomi: "わんしょう" },
+  { customer: "客先A", code: "P022", name: "腰巻き", yomi: "こしまき" },
+  { customer: "客先A", code: "P023", name: "三角巾", yomi: "さんかくきん" },
+  { customer: "客先A", code: "P024", name: "靴下", yomi: "くつした" },
+  { customer: "客先A", code: "P025", name: "軍手", yomi: "ぐんて" },
+  { customer: "客先B", code: "P001", name: "コックコート", yomi: "こっくこーと" },
+  { customer: "客先B", code: "P002", name: "前掛け（短）", yomi: "まえかけみじか" },
+  { customer: "客先B", code: "P003", name: "前掛け（長）", yomi: "まえかけなが" },
+  { customer: "客先B", code: "P004", name: "ナプキン", yomi: "なぷきん" },
+  { customer: "客先B", code: "P005", name: "テーブルクロス", yomi: "てーぶるくろす" },
+  { customer: "客先B", code: "P006", name: "ランチョンマット", yomi: "らんちょんまっと" },
+  { customer: "客先B", code: "P007", name: "座席カバー", yomi: "ざせきかばー" },
+  { customer: "客先B", code: "P008", name: "厨房タオル", yomi: "ちゅうぼうたおる" },
+  { customer: "客先B", code: "P009", name: "ダスター", yomi: "だすたー" },
+  { customer: "客先B", code: "P010", name: "三角巾", yomi: "さんかくきん" },
+  { customer: "客先B", code: "P011", name: "ハンバーガー帽", yomi: "はんばーがーぼう" },
+  { customer: "客先B", code: "P012", name: "ホールエプロン", yomi: "ほーるえぷろん" },
+  { customer: "客先B", code: "P013", name: "バンダナ", yomi: "ばんだな" },
+  { customer: "客先B", code: "P014", name: "ふきん", yomi: "ふきん" },
+  { customer: "客先B", code: "P015", name: "厨房靴", yomi: "ちゅうぼうぐつ" },
+  { customer: "客先C", code: "P001", name: "患者着（上）", yomi: "かんじゃぎうえ" },
+  { customer: "客先C", code: "P002", name: "患者着（下）", yomi: "かんじゃぎした" },
+  { customer: "客先C", code: "P003", name: "看護師白衣", yomi: "かんごしはくい" },
+  { customer: "客先C", code: "P004", name: "看護師ズボン", yomi: "かんごしずぼん" },
+  { customer: "客先C", code: "P005", name: "スクラブ（上）", yomi: "すくらぶうえ" },
+  { customer: "客先C", code: "P006", name: "スクラブ（下）", yomi: "すくらぶした" },
+  { customer: "客先C", code: "P007", name: "ガウン", yomi: "がうん" },
+  { customer: "客先C", code: "P008", name: "シーツ（シングル）", yomi: "しーつしんぐる" },
+  { customer: "客先C", code: "P009", name: "シーツ（ダブル）", yomi: "しーつだぶる" },
+  { customer: "客先C", code: "P010", name: "枕カバー", yomi: "まくらかばー" },
+  { customer: "客先C", code: "P011", name: "バスタオル", yomi: "ばすたおる" },
+  { customer: "客先C", code: "P012", name: "フェイスタオル", yomi: "ふぇいすたおる" },
+  { customer: "客先C", code: "P013", name: "バスマット", yomi: "ばすまっと" },
+  { customer: "客先C", code: "P014", name: "カーテン", yomi: "かーてん" },
+  { customer: "客先C", code: "P015", name: "オペ着", yomi: "おぺぎ" },
+  { customer: "客先C", code: "P016", name: "帽子（手術用）", yomi: "ぼうししゅじゅつよう" },
+  { customer: "客先C", code: "P017", name: "マスク（使い捨て）", yomi: "ますくつかいすて" },
+  { customer: "客先C", code: "P018", name: "足袋", yomi: "たび" }
 ];
 
 /** 試用・仮運用で履歴が空のときだけ入れる見本台帳 */
@@ -666,7 +728,7 @@ function buildDemoLedgers() {
       customer: "客先A",
       deliveryDate: demoDateOffset(1),
       items: demoLedgerItems("客先A", [
-        ["N001", 20, 18], ["N002", 20, 18], ["N004", 8, 8], ["N005", 30, 28], ["N025", 40, 40]
+        ["P001", 20, 18], ["P002", 20, 18], ["P004", 8, 8], ["P005", 30, 28], ["P025", 40, 40]
       ]),
       createdAt: new Date(base - 3 * 3600000).toISOString(),
       createdBy: "",
@@ -677,7 +739,7 @@ function buildDemoLedgers() {
       customer: "客先B",
       deliveryDate: demoDateOffset(3),
       items: demoLedgerItems("客先B", [
-        ["N001", 6, 6], ["N003", 10, 9], ["N004", 50, 48], ["N008", 20, 20], ["N012", 4, 4]
+        ["P001", 6, 6], ["P003", 10, 9], ["P004", 50, 48], ["P008", 20, 20], ["P012", 4, 4]
       ]),
       createdAt: new Date(base - 2 * 86400000).toISOString(),
       createdBy: "",
@@ -688,7 +750,7 @@ function buildDemoLedgers() {
       customer: "客先C",
       deliveryDate: demoDateOffset(5),
       items: demoLedgerItems("客先C", [
-        ["N001", 15, 12], ["N002", 15, 12], ["N003", 8, 8], ["N008", 25, 24], ["N011", 40, 40]
+        ["P001", 15, 12], ["P002", 15, 12], ["P003", 8, 8], ["P008", 25, 24], ["P011", 40, 40]
       ]),
       createdAt: new Date(base - 5 * 86400000).toISOString(),
       createdBy: "",
@@ -717,7 +779,9 @@ function slipV14FromLedger() {
   const clients = {};
   const clientGroups = {};
   for (const c of state.customers) {
-    clients[c.name] = { items: [] };
+    const row = { items: [] };
+    if ((c.symbol || "").trim()) row.symbol = c.symbol.trim();
+    clients[c.name] = row;
     const g = (c.group || "").trim();
     if (g && groupIdByName[g]) clientGroups[c.name] = groupIdByName[g];
   }
@@ -734,9 +798,10 @@ function slipV14FromLedger() {
   }
   let prev = {};
   try { prev = JSON.parse(localStorage.getItem(BRIDGE_V14_KEY) || "{}"); } catch {}
+  const cycles = (state.cycles && Object.keys(state.cycles).length) ? state.cycles : (prev.cycles || {});
   return {
     clients,
-    cycles: prev.cycles || {},
+    cycles,
     products: [...productsMap.values()],
     groups,
     clientGroups,
@@ -764,7 +829,12 @@ function applySlipV14ToLedger(d) {
     i += 1;
     const gid = (d.clientGroups || {})[name];
     const group = gid ? (groupIdToName[gid] || "") : "";
-    customers.push({ id: String(i).padStart(3, "0"), name, group });
+    customers.push({
+      id: String(i).padStart(3, "0"),
+      name,
+      group,
+      symbol: (cl && cl.symbol) || ""
+    });
     for (const it of (cl.items || [])) {
       prices.push({
         customer: name,
@@ -777,6 +847,7 @@ function applySlipV14ToLedger(d) {
   state.customers = customers.map(normalizeCustomer).filter(c => c.name);
   state.prices = normalizeMasterItems(prices);
   state.groupOrder = normalizeGroupOrder((d.groups || []).map(g => g.name));
+  state.cycles = (d.cycles && typeof d.cycles === "object") ? { ...d.cycles } : {};
   syncGroupOrderFromCustomers();
   return true;
 }
@@ -938,9 +1009,32 @@ async function issueToSlip() {
 }
 /** @deprecated 旧名互換 */
 function issueToSlipDemo() { return issueToSlip(); }
+function pcLinkBadgeHtml() {
+  if (state.demoMode || IS_DEMO) {
+    return `<div class="pc-link-badge demo" title="デモは同じ端末内の伝票デモとだけつながります">デモ連動（この端末のみ）</div>`;
+  }
+  if (!navigator.onLine) {
+    return `<div class="pc-link-badge off" title="ネットが戻ると、未送信の伝票は自動で送られます">オフライン（未送信は端末に保持）</div>`;
+  }
+  return `<div class="pc-link-badge" title="客先・品目マスタと伝票キューをクラウド経由でPCの伝票アプリと共有しています">PCの伝票と連動中</div>`;
+}
+function refreshPcLinkBadge() {
+  const el = document.querySelector(".pc-link-badge");
+  if (!el) return;
+  const wrap = document.createElement("div");
+  wrap.innerHTML = pcLinkBadgeHtml();
+  const next = wrap.firstElementChild;
+  if (next) el.replaceWith(next);
+}
 // ネットの切れ・戻りを知らせる（送信待ちは端末に残り、戻ったら自動で送られる）
-window.addEventListener("offline", () => toast("ネットが切れました。伝票への送信は端末に保存され、戻ったら自動で送ります", "error"));
-window.addEventListener("online", () => toast("ネットに戻りました"));
+window.addEventListener("offline", () => {
+  refreshPcLinkBadge();
+  toast("ネットが切れました。伝票への送信は端末に保存され、戻ったら自動で送ります", "error");
+});
+window.addEventListener("online", () => {
+  refreshPcLinkBadge();
+  toast("ネットに戻りました");
+});
 
 const ZOOM_KEY = "lg_itemZoom";
 const ZOOM_MIN = 0.7;
@@ -1097,6 +1191,7 @@ const state = {
   ledgers: [],
   customer: "",
   deliveryDate: "",
+  deliveryDateFromCycle: false,
   lotNo: loadLotNo(),
   items: [],
   focus: null,
@@ -1123,6 +1218,7 @@ const state = {
   masterItemZoom: loadMasterItemZoom(),
   masterForm: null,
   groupOrder: [],
+  cycles: {},
   custGroup: null, // 入力画面で選んでいるグループ（null=未設定→客先から決める、""=すべて）
 };
 
@@ -1230,6 +1326,66 @@ function applyLedgerRetention(ledgers) {
 function cacheLedgers() {
   const key = state.demoMode ? LEDGERS_KEY_DEMO : "lg_ledgers";
   try { localStorage.setItem(key, JSON.stringify(state.ledgers)); } catch {}
+}
+
+function ledgerIdEq(a, b) {
+  return String(a) === String(b);
+}
+
+async function deleteLedgerDocsByRecordId(recordId) {
+  if (state.demoMode) return;
+  const idNum = Number(recordId);
+  const candidates = Number.isFinite(idNum) ? [idNum, recordId, String(recordId)] : [recordId, String(recordId)];
+  const seen = new Set();
+  for (const idVal of candidates) {
+    const key = `${typeof idVal}:${idVal}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const q = query(collection(db, "ledgerRecords"), where("id", "==", idVal), limit(20));
+      const snap = await getDocs(q);
+      await Promise.all(snap.docs.map(d => deleteDoc(d.ref)));
+    } catch (e) {
+      console.warn("deleteLedgerDocsByRecordId", idVal, e);
+    }
+  }
+}
+
+async function deleteLedgerRecord(ledger) {
+  if (!ledger) return false;
+  const label = `${ledger.customer || "（客先なし）"} / ${fmtDate(ledger.deliveryDate)}`;
+  if (!confirm(`この履歴を削除しますか？\n${label}`)) return false;
+  state.ledgers = state.ledgers.filter(l => !ledgerIdEq(l.id, ledger.id));
+  cacheLedgers();
+  try {
+    await deleteLedgerDocsByRecordId(ledger.id);
+    toast("履歴を削除しました");
+    return true;
+  } catch (e) {
+    console.error(e);
+    toast("削除に失敗しました", "error");
+    return false;
+  }
+}
+
+async function clearAllLedgerHistory() {
+  const n = state.ledgers.length;
+  if (!n) { toast("削除する履歴がありません"); return false; }
+  if (!confirm(`履歴 ${n} 件をすべて削除しますか？\nこの操作は取り消せません。`)) return false;
+  const ids = state.ledgers.map(l => l.id);
+  state.ledgers = [];
+  cacheLedgers();
+  try {
+    if (!state.demoMode) {
+      await Promise.all(ids.map(id => deleteLedgerDocsByRecordId(id)));
+    }
+    toast(`履歴 ${n} 件を削除しました`);
+    return true;
+  } catch (e) {
+    console.error(e);
+    toast("削除に失敗しました", "error");
+    return false;
+  }
 }
 
 async function pruneOldLedgersFromCloud() {
@@ -1559,23 +1715,27 @@ function nextCustomerId() {
   return String((ids.length ? Math.max(...ids) : 0) + 1).padStart(3, "0");
 }
 
-/** 品目コードは N 始まり（例: N001） */
+/** 品目コードは P 始まり（伝票アプリと同じ。例: P001） */
 function nextItemCode() {
   let max = 0;
   for (const p of state.prices) {
-    const m = String(p.code || "").trim().match(/^N(\d+)$/i);
+    const m = String(p.code || "").trim().match(/^[NP](\d+)$/i);
     if (m) max = Math.max(max, parseInt(m[1], 10));
   }
-  return "N" + String(max + 1).padStart(3, "0");
+  return "P" + String(max + 1).padStart(3, "0");
 }
 
 function normalizeItemCode(code, { assignIfEmpty = false } = {}) {
   let c = String(code || "").trim().toUpperCase();
   if (!c) return assignIfEmpty ? nextItemCode() : "";
-  if (c.startsWith("N")) return c;
+  if (c.startsWith("P")) return c;
+  if (c.startsWith("N")) {
+    const m = c.match(/^N(\d+)$/i);
+    return m ? ("P" + m[1].padStart(3, "0")) : ("P" + c.slice(1));
+  }
   const digits = c.match(/(\d+)$/);
-  if (digits) return "N" + digits[1].padStart(3, "0");
-  return "N" + c;
+  if (digits) return "P" + digits[1].padStart(3, "0");
+  return "P" + c;
 }
 
 function customerItemRows(customer) {
@@ -1663,6 +1823,10 @@ async function submitMasterForm() {
         );
         if (group && !state.groupOrder.includes(group)) state.groupOrder.push(group);
         state.prices = state.prices.map(p => p.customer === f.oldName ? { ...p, customer: name } : p);
+        if (name !== f.oldName && state.cycles && state.cycles[f.oldName] != null) {
+          state.cycles[name] = state.cycles[f.oldName];
+          delete state.cycles[f.oldName];
+        }
         if (state.customer === f.oldName) {
           state.customer = name;
           loadCustomerItems(name);
@@ -1707,11 +1871,13 @@ async function deleteMasterCustomer(name) {
   try {
     state.customers = state.customers.filter(c => c.name !== name);
     state.prices = state.prices.filter(p => p.customer !== name);
+    if (state.cycles) delete state.cycles[name];
     if (state.customer === name) {
       state.customer = "";
       state.items = [];
       state.focus = null;
       state.buffer = "";
+      state.deliveryDateFromCycle = false;
     }
     if (state.masterCustomer === name) state.masterCustomer = state.customers[0]?.name || "";
     await persistLedgerMaster();
@@ -1797,11 +1963,13 @@ function selectCustomer(name) {
   if (!name) {
     state.customer = "";
     state.items = [];
+    state.deliveryDateFromCycle = false;
     render();
     return;
   }
   state.custGroup = groupOfCustomer(name); // 客先のグループに合わせる
   loadCustomerItems(name);
+  applyCycleDeliveryDate(name);
   render();
 }
 
@@ -2217,11 +2385,15 @@ function renderInputTab() {
   const hasNamedGroup = groupsAll.some(g => g.group !== UNGROUPED_LABEL);
   if (state.custGroup === null) state.custGroup = groupOfCustomer(state.customer);
   if (state.custGroup && !groupsAll.some(g => g.group === state.custGroup)) state.custGroup = "";
-  const activeGroup = hasNamedGroup ? state.custGroup : "";
+  // グループ未設定でも選択欄は常に出す（「これから付ける」ことが分かるように）
+  const activeGroup = state.custGroup || "";
   const custOpts = renderCustomerSelectOptionsForGroup(state.customer, activeGroup);
-  const groupField = hasNamedGroup ? `
+  const groupHint = hasNamedGroup
+    ? ""
+    : `<p style="font-size:11px;color:#888;margin:4px 0 0">まだグループがありません。マスタのグループ、または伝票アプリで設定すると選べます</p>`;
+  const groupField = `
           <div><label class="lbl">グループ</label>
-            <select id="cust-group-select">${renderCustomerGroupOptions(activeGroup)}</select></div>` : "";
+            <select id="cust-group-select">${renderCustomerGroupOptions(activeGroup)}</select>${groupHint}</div>`;
   const layout = itemLayoutMeta();
   const headUnit = `<div class="list-head-unit"><span>品名</span><span>数量</span></div>`;
 
@@ -2242,11 +2414,25 @@ function renderInputTab() {
   return `
     <div class="input-layout">
       <div class="card input-fixed">
-        <div class="meta-row${hasNamedGroup ? " has-group" : ""}">${groupField}
+        <div class="meta-row has-group">${groupField}
           <div><label class="lbl">客先</label>
-            <select id="cust-select"><option value="">-- 選択 --</option>${custOpts}</select></div>
-          <div><label class="lbl">納品日</label>
-            <input type="date" id="delivery-date" value="${state.deliveryDate || todayInput()}"></div>
+            <select id="cust-select"><option value="">-- 選択 --</option>${custOpts}</select>
+            ${(() => {
+              const sym = symbolOfCustomer(state.customer);
+              const cyc = cycleOfCustomer(state.customer);
+              if (!state.customer) return "";
+              const bits = [];
+              if (sym) bits.push(`記号 ${esc(sym)}`);
+              if (cyc) bits.push(`サイクル ${esc(cyc)}`);
+              return bits.length
+                ? `<p style="font-size:11px;color:#5a7a90;margin:4px 0 0;font-weight:600">${bits.join(" · ")}</p>`
+                : `<p style="font-size:11px;color:#888;margin:4px 0 0">記号・サイクル未設定</p>`;
+            })()}</div>
+          <div><label class="lbl">納品日${cycleOfCustomer(state.customer) ? `（${esc(cycleOfCustomer(state.customer))}）` : ""}</label>
+            <input type="date" id="delivery-date" value="${state.deliveryDate || todayInput()}">
+            ${state.customer && state.deliveryDateFromCycle
+              ? `<p style="font-size:11px;color:#888;margin:4px 0 0">入力日の次のサイクル日（手で変えられます）</p>`
+              : ""}</div>
           <div><label class="lbl">ロット番号${state.lotNo ? `（${esc(state.lotNo)}で継続中）` : ""}</label>
             <select id="lot-select">
               <option value="">-- 選択 --</option>
@@ -2338,15 +2524,18 @@ function renderHistoryTab() {
   if (list.length === 0) {
     return `<div class="empty">保存された台帳はまだありません</div>`;
   }
-  return `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px">
-    <p class="history-note" style="margin:0">納品日の新しい順 · 直近${HISTORY_MONTHS}か月</p>
-    <button class="btn btn-ghost" id="btn-refresh-history" style="background:#fff;border:1px solid #ddd;color:#333;padding:6px 12px;font-size:12px;flex-shrink:0">↻ 更新</button>
+  return `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;flex-wrap:wrap">
+    <p class="history-note" style="margin:0">納品日の新しい順 · 直近${HISTORY_MONTHS}か月 · 行を開いて削除可</p>
+    <div style="display:flex;gap:8px;flex-shrink:0">
+      <button class="btn btn-ghost" id="btn-refresh-history" style="background:#fff;border:1px solid #ddd;color:#333;padding:6px 12px;font-size:12px">↻ 更新</button>
+      <button class="btn btn-ghost" id="btn-clear-history" style="background:#fff3e0;border:1px solid #ffcc80;color:#c62828;padding:6px 12px;font-size:12px">すべて削除</button>
+    </div>
   </div>
   <table class="history-table">
     <thead><tr><th>納品日</th><th>客先</th><th class="num">数量</th></tr></thead>
     <tbody>${list.map(l => {
       const outSum = l.items.reduce((s, it) => s + (it.outQty || 0), 0);
-      return `<tr class="history-row" data-id="${l.id}">
+      return `<tr class="history-row" data-id="${esc(String(l.id))}">
         <td class="col-date">${fmtDate(l.deliveryDate)}</td>
         <td class="col-customer">${esc(l.customer)}</td>
         <td class="num">${outSum || "—"}</td>
@@ -2569,8 +2758,8 @@ function renderMasterForm() {
         <label class="lbl">読み仮名（あ行検索用）</label>
         <input type="text" id="master-form-yomi" value="${esc(f.yomi || "")}" placeholder="例：さぎょうぎうえ" inputmode="kana">
         <p style="font-size:11px;color:#888;margin:-4px 0 10px">ひらがな・カタカナどちらでも可。漢字品名の行分けに使います</p>
-        <label class="lbl">コード（N始まり）</label>
-        <input type="text" id="master-form-code" value="${esc(f.code)}" placeholder="例：N001">` : ""}
+        <label class="lbl">コード（P始まり）</label>
+        <input type="text" id="master-form-code" value="${esc(f.code)}" placeholder="例：P001">` : ""}
         <div class="master-form-actions">
           <button type="button" class="btn btn-ghost" id="master-form-cancel" style="background:#f4f3ef;color:#1a1a2e">キャンセル</button>
           <button type="button" class="btn btn-primary" id="master-form-save">保存</button>
@@ -2591,6 +2780,7 @@ function renderDetail(ledger) {
         <p style="font-size:13px;color:#666">${fmtDate(ledger.deliveryDate)} · 保存 ${fmtDate(ledger.createdAt)} ${fmtTime(ledger.createdAt)}</p>
         <table class="detail-table"><thead><tr><th>品名</th><th>数量</th></tr></thead><tbody>${rows}</tbody></table>
         <div class="memo-actions">
+          <button class="btn btn-ghost" id="detail-delete" style="background:#fff3e0;color:#c62828">削除</button>
           <button class="btn btn-ghost" id="detail-memo" style="background:#f0ebff;color:#5b4b8a">伝票入力メモ</button>
           <button class="btn btn-primary" id="detail-close">閉じる</button>
         </div>
@@ -2617,7 +2807,7 @@ function render() {
     <div class="app">
       ${IS_DEMO ? `<div class="demo-banner">⚠ お試し（デモ）環境です。伝票デモとマスタ連動中・この端末のみ。</div>` : ""}
       <header class="header">
-        <div class="header-brand"><h1>${IS_DEMO ? "【デモ】入出荷台帳" : "入出荷台帳"}</h1><div class="header-sub">${esc(sessionLabel())}${state.lotNo ? ` · ロット ${esc(state.lotNo)}` : " · ロット未選択"}</div></div>
+        <div class="header-brand"><h1>${IS_DEMO ? "【デモ】入出荷台帳" : "入出荷台帳"}</h1><div class="header-sub">${esc(sessionLabel())}${state.lotNo ? ` · ロット ${esc(state.lotNo)}` : " · ロット未選択"}</div>${pcLinkBadgeHtml()}</div>
         <nav class="header-tabs" aria-label="画面切替">
           <button type="button" class="header-tab${state.tab === 0 ? " active" : ""}" data-tab="0">入力</button>
           <button type="button" class="header-tab${state.tab === 1 ? " active" : ""}" data-tab="1">履歴${state.ledgers.length ? ` (${state.ledgers.length})` : ""}</button>
@@ -2710,7 +2900,10 @@ function render() {
     const gsel = document.getElementById("cust-group-select");
     if (gsel) gsel.onchange = e => { state.custGroup = e.target.value; render(); };
     const dt = document.getElementById("delivery-date");
-    if (dt) dt.onchange = e => { state.deliveryDate = e.target.value; };
+    if (dt) dt.onchange = e => {
+      state.deliveryDate = e.target.value;
+      state.deliveryDateFromCycle = false;
+    };
     if (!state.deliveryDate) state.deliveryDate = dt?.value || todayInput();
     ensureLotPersists();
     const lotSel = document.getElementById("lot-select");
@@ -2840,10 +3033,15 @@ function render() {
       } catch { toast("更新に失敗しました", "error"); }
       render();
     };
+    const clearBtn = document.getElementById("btn-clear-history");
+    if (clearBtn) clearBtn.onclick = async () => {
+      const ok = await clearAllLedgerHistory();
+      if (ok) render();
+    };
     document.querySelectorAll(".history-row").forEach(el => {
       el.onclick = () => {
-        const id = +el.dataset.id;
-        state.detail = state.ledgers.find(l => l.id === id) || null;
+        const id = el.dataset.id;
+        state.detail = state.ledgers.find(l => ledgerIdEq(l.id, id)) || null;
         render();
       };
     });
@@ -2994,6 +3192,15 @@ function render() {
   if (closeBtn) closeBtn.onclick = () => { state.detail = null; render(); };
   const detailMemoBtn = document.getElementById("detail-memo");
   if (detailMemoBtn) detailMemoBtn.onclick = () => showInvoiceMemo(state.detail);
+  const detailDeleteBtn = document.getElementById("detail-delete");
+  if (detailDeleteBtn) detailDeleteBtn.onclick = async () => {
+    const target = state.detail;
+    const ok = await deleteLedgerRecord(target);
+    if (ok) {
+      state.detail = null;
+      render();
+    }
+  };
   const overlay = document.getElementById("detail-overlay");
   if (overlay) overlay.onclick = e => { if (e.target === overlay) { state.detail = null; render(); } };
 
@@ -3009,9 +3216,30 @@ function startDemoMode() {
   window.bootApp();
 }
 
+/** ?clearHistory=1 でこの端末の台帳履歴（localStorage）を消す。クラウドの ledgerRecords も空なら0件になる */
+function clearLocalLedgerHistoryIfRequested() {
+  try {
+    const sp = new URLSearchParams(location.search);
+    if (sp.get("clearHistory") !== "1") return false;
+    ["lg_ledgers", "lg_ledgers_demo", "lg_ledgers_trial"].forEach(k => {
+      try { localStorage.removeItem(k); } catch {}
+    });
+    state.ledgers = [];
+    sp.delete("clearHistory");
+    const q = sp.toString();
+    const next = location.pathname + (q ? `?${q}` : "") + location.hash;
+    history.replaceState(null, "", next);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 window.bootApp = async function() {
+  const cleared = clearLocalLedgerHistoryIfRequested();
   if (!state.deliveryDate) state.deliveryDate = todayInput();
   await loadMasters();
+  if (cleared) toast("この端末の台帳履歴を消しました");
   registerServiceWorkerLater();
 };
 
