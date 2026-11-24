@@ -1038,7 +1038,7 @@ window.addEventListener("online", () => {
 
 const ZOOM_KEY = "lg_itemZoom";
 const ZOOM_MIN = 0.7;
-const ZOOM_MAX = 1.5;
+const ZOOM_MAX = 1.8;
 const ZOOM_STEP = 0.1;
 const ITEM_COLS_KEY = "lg_itemCols";
 const ITEM_COLS_OPTIONS = [2, 3, 4];
@@ -1100,7 +1100,8 @@ function itemLayoutMeta(n = state.items.length) {
 
 /**
  * 2列×15行が画面に収まる行高を基準にする。
- * ズームは行高に掛け算。3・4列も同じ行高を共用。
+ * ズームは行高・文字サイズに掛け算。3・4列も同じ行高を共用。
+ * ※以前は行高上限64px／文字上限が低く、タブレットで拡大してもほぼ見えなかった。
  */
 function applyItemColLayout() {
   const panel = document.querySelector(".items-panel");
@@ -1108,18 +1109,22 @@ function applyItemColLayout() {
   if (!panel || !scroll) return;
 
   const total = Math.floor(scroll.clientHeight - 4);
-  if (total < 100) return;
+  if (total < 80) return;
 
   const zoom = Number(state.itemZoom) || 1;
-  const headH = Math.max(18, Math.min(28, Math.round(total * 0.045)));
-  const rowH = Math.max(28, Math.min(64, Math.round(((total - headH) / BASE_VISIBLE_ROWS) * zoom * 10) / 10));
-  const qtyH = Math.max(22, Math.min(rowH - 4, Math.round(rowH * 0.82)));
-  const qtyW = Math.max(48, Math.min(76, Math.round(rowH * 1.35 + 10)));
-  const nameFs = Math.max(12, Math.min(22, Math.round(rowH * 0.42 * 10) / 10));
-  const qtyFs = Math.max(13, Math.min(24, Math.round(rowH * 0.48 * 10) / 10));
-  const codeFs = Math.max(10, Math.min(13, Math.round(nameFs * 0.65)));
-  const headFs = Math.max(10, Math.min(13, Math.round(nameFs * 0.7)));
+  const headH = Math.max(18, Math.min(30, Math.round(total * 0.045)));
+  // zoom=1 の基準行高（画面に15行前後）。上限はゆとりを持たせ、拡大が頭打ちにならないようにする
+  const baseRow = Math.max(28, Math.min(56, (total - headH) / BASE_VISIBLE_ROWS));
+  const rowH = Math.max(24, Math.min(96, Math.round(baseRow * zoom * 10) / 10));
+  const qtyH = Math.max(20, Math.min(rowH - 2, Math.round(rowH * 0.82)));
+  const qtyW = Math.max(44, Math.min(110, Math.round((52 + baseRow * 0.35) * zoom)));
+  // 文字サイズは行高だけでなく zoom も直接効かせる（上限に張り付いても差が出る）
+  const nameFs = Math.max(12, Math.min(34, Math.round(Math.max(rowH * 0.42, 15 * zoom) * 10) / 10));
+  const qtyFs = Math.max(13, Math.min(36, Math.round(Math.max(rowH * 0.48, 17 * zoom) * 10) / 10));
+  const codeFs = Math.max(10, Math.min(16, Math.round(nameFs * 0.65)));
+  const headFs = Math.max(10, Math.min(16, Math.round(nameFs * 0.7)));
 
+  panel.style.setProperty("--iz", String(zoom));
   panel.style.setProperty("--row-h", `${rowH}px`);
   panel.style.setProperty("--qty-h", `${qtyH}px`);
   panel.style.setProperty("--qty-w", `${qtyW}px`);
@@ -1151,9 +1156,11 @@ function setItemZoom(next, { persist = true } = {}) {
   state.itemZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(next * 100) / 100));
   if (persist) localStorage.setItem(ZOOM_KEY, String(state.itemZoom));
   const panel = document.querySelector(".items-panel");
-  if (panel) panel.style.setProperty("--iz", state.itemZoom);
+  if (panel) panel.style.setProperty("--iz", String(state.itemZoom));
   updateZoomControls();
   applyItemColLayout();
+  // タブレットでレイアウト未確定のときがあるので、次フレームでもう一度当てる
+  requestAnimationFrame(() => applyItemColLayout());
 }
 
 function isLandscape() {
