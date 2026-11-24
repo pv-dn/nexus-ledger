@@ -381,12 +381,12 @@ function bindInstallButtons() {
   updateInstallUi();
 }
 
-const APP_BUILD = "20261124-v60";
+const APP_BUILD = "20261124-v61";
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
   const run = async () => {
     try {
-      const reg = await navigator.serviceWorker.register("./sw.js?v=60", { updateViaCache: "none" });
+      const reg = await navigator.serviceWorker.register("./sw.js?v=61", { updateViaCache: "none" });
       try { await reg.update(); } catch {}
       if (reg.waiting) {
         try { reg.waiting.postMessage({ type: "SKIP_WAITING" }); } catch {}
@@ -2060,43 +2060,24 @@ function fillDemoYomiIfMissing() {
   });
 }
 
-/** 自社版が端末キャッシュ／旧共有に残っているのを一度だけ消す */
+/** 自社版の古い端末キャッシュだけ捨てる。クラウド共有は消さない（伝票バックアップを潰さない） */
 async function purgeLegacyCompanyMasterOnce() {
-  const mark = "lg_purge_company_master_v3";
+  const mark = "lg_purge_company_master_v4";
   try { if (localStorage.getItem(mark) === "1") return false; } catch {}
   const legacyKeys = [
     "lg_master_customers", "lg_master_items", "lg_master_groups",
     "lg_master_customers_demo", "lg_master_items_demo", "lg_master_groups_demo",
     "lg_master_customers_trial", "lg_master_items_trial", "lg_master_groups_trial",
     "purims_v14", "purims_bridge_rev", "purims_issue_pending",
-    "lg_primus_master_customers", "lg_primus_master_items", "lg_primus_master_groups",
-    MASTER_CUST_KEY, MASTER_ITEMS_KEY, MASTER_GROUP_KEY,
-    MASTER_CUST_KEY_DEMO, MASTER_ITEMS_KEY_DEMO, MASTER_GROUP_KEY_DEMO,
-    BRIDGE_V14_KEY, BRIDGE_REV_KEY
+    "lg_purge_company_master_v3"
   ];
   legacyKeys.forEach(k => { try { localStorage.removeItem(k); } catch {} });
-  state.customers = [];
-  state.prices = [];
-  state.groupOrder = [];
-  try {
-    const empty = { clients: {}, cycles: {}, products: [], groups: [], clientGroups: {}, clientOrder: {}, closing: {} };
-    await setDoc(doc(db, "sharedMasters", SHARED_MASTER_DOC), {
-      value: JSON.stringify(empty),
-      updatedAt: new Date().toISOString(),
-      updatedBy: "ledger-purge"
-    });
-  } catch (e) { console.warn("purge sharedMasters", e); }
-  try {
-    await fsSaveLedger("customers", []);
-    await fsSaveLedger("items", []);
-    await fsSaveLedger("groupOrder", []);
-  } catch (e) { console.warn("purge ledgerMaster", e); }
   try { localStorage.setItem(mark, "1"); } catch {}
   return true;
 }
 
 async function loadLedgerMaster() {
-  const purged = await purgeLegacyCompanyMasterOnce();
+  await purgeLegacyCompanyMasterOnce();
   if (state.demoMode) {
     if (IS_DEMO) {
       const pulled = pullMastersFromSlipBridge();
@@ -2126,7 +2107,6 @@ async function loadLedgerMaster() {
     state.prices = normalizeMasterItems(state.prices);
     syncGroupOrderFromCustomers();
     cacheLedgerMaster();
-    if (purged) toast("自社マスタの混入を削除しました（プリームス用に初期化）");
     return;
   }
   const shared = await pullSharedMastersCloud();
