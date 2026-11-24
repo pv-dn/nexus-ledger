@@ -43,5 +43,21 @@ service cloud.firestore {
       allow read: if true;
       allow write: if request.resource.data.keys().hasAll(["value", "updatedAt", "updatedBy"]);
     }
+
+    // 写真メモ共有（台帳タブレット同士・伝票。仮運用でも読める）
+    match /ledgerPhotos/{docId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(["customer", "photos", "status", "at", "source"])
+        && request.resource.data.source == "ledger"
+        && (request.resource.data.status == "draft" || request.resource.data.status == "saved");
+      allow delete: if true;
+    }
+    match /ledgerPhotos_demo/{docId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasAll(["customer", "photos", "status", "at", "source"])
+        && request.resource.data.source == "ledger"
+        && (request.resource.data.status == "draft" || request.resource.data.status == "saved");
+      allow delete: if true;
+    }
   }
 }

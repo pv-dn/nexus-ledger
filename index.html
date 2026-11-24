@@ -280,6 +280,7 @@ const BRIDGE_V14_KEY = IS_DEMO ? "purims_demo_v14" : "purims_v14";
 const BRIDGE_REV_KEY = IS_DEMO ? "purims_demo_bridge_rev" : "purims_bridge_rev";
 const BRIDGE_ISSUE_KEY = IS_DEMO ? "purims_demo_issue_pending" : "purims_issue_pending";
 const ISSUE_PENDING_COL = IS_DEMO ? "ledgerIssuePending_demo" : "ledgerIssuePending";
+const LEDGER_PHOTOS_COL = IS_DEMO ? "ledgerPhotos_demo" : "ledgerPhotos";
 const LOT_KEY = "lg_current_lot";
 const LOT_OPTIONS = ["1","2","3","4","5","6","7","8","9","10"];
 
@@ -1376,6 +1377,132 @@ function setCurrentPhotoMemos(list) {
   else state.photoMemosByCustomer[name] = list;
 }
 
+function photoCustomerKey(name) {
+  return String(name || "").trim().replace(/[\/#?[\]\s]+/g, "_").slice(0, 80) || "unknown";
+}
+
+function draftPhotoDocId(customer) {
+  return "draft_" + photoCustomerKey(customer);
+}
+
+/** 仮運用でも台帳同士・伝票と共有するためクラウドへ上げる */
+async function pushSharedPhotoDraft() {
+  const customer = (state.customer || "").trim();
+  if (!customer) return;
+  const ref = doc(db, LEDGER_PHOTOS_COL, draftPhotoDocId(customer));
+  const photos = currentPhotoMemos();
+  try {
+    if (!photos.length) {
+      await deleteDoc(ref);
+      return;
+    }
+    await setDoc(ref, {
+      customer,
+      deliveryDate: state.deliveryDate || todayInput(),
+      lotNo: state.lotNo || "",
+      photos,
+      status: "draft",
+      at: new Date().toISOString(),
+      source: "ledger"
+    });
+  } catch (e) {
+    console.warn("pushSharedPhotoDraft", e);
+  }
+}
+
+async function pullSharedPhotoDraft() {
+  const customer = (state.customer || "").trim();
+  if (!customer) return false;
+  try {
+    const snap = await getDoc(doc(db, LEDGER_PHOTOS_COL, draftPhotoDocId(customer)));
+    if (!snap.exists()) return false;
+    const d = snap.data();
+    if (d.status !== "draft" || !Array.isArray(d.photos)) return false;
+    const local = currentPhotoMemos();
+    const remoteAt = Date.parse(d.at || "") || 0;
+    const localAt = local.reduce((m, p) => Math.max(m, Date.parse(p.takenAt || "") || 0), 0);
+    // 向こうの方が新しい、またはこっちが空なら取り込む
+    if (remoteAt >= localAt || !local.length) {
+      const next = d.photos.filter(p => p && p.dataUrl).slice(0, PHOTO_MEMO_MAX);
+      const same = JSON.stringify(local.map(p => p.id)) === JSON.stringify(next.map(p => p.id));
+      if (!same) {
+        setCurrentPhotoMemos(next);
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn("pullSharedPhotoDraft", e);
+  }
+  return false;
+}
+
+async function pushSharedPhotoSaved(record) {
+  if (!hasPhotoMemos(record)) return false;
+  try {
+    await addDoc(collection(db, LEDGER_PHOTOS_COL), {
+      customer: record.customer,
+      deliveryDate: record.deliveryDate,
+      lotNo: record.lotNo || "",
+      recordId: record.id,
+      photos: record.photos,
+      status: "saved",
+      at: record.createdAt || new Date().toISOString(),
+      source: "ledger"
+    });
+    try { await deleteDoc(doc(db, LEDGER_PHOTOS_COL, draftPhotoDocId(record.customer))); } catch {}
+    return true;
+  } catch (e) {
+    console.warn("pushSharedPhotoSaved", e);
+    return false;
+  }
+}
+
+/** クラウド上の保存済み写真を履歴にマージ（タブレット同士で見えるように） */
+async function mergeSharedPhotosToLedgers() {
+  try {
+    const snap = await getDocs(query(collection(db, LEDGER_PHOTOS_COL), orderBy("at", "desc"), limit(80)));
+    const saved = snap.docs
+      .map(d => ({ _docId: d.id, ...d.data() }))
+      .filter(d => d.status === "saved" && Array.isArray(d.photos) && d.photos.length);
+    let changed = false;
+    for (const d of saved) {
+      const match = state.ledgers.find(l =>
+        (d.recordId != null && ledgerIdEq(l.id, d.recordId))
+        || (l.customer === d.customer
+          && l.deliveryDate === d.deliveryDate
+          && String(l.lotNo || "") === String(d.lotNo || "")
+          && Math.abs((Date.parse(l.createdAt || "") || 0) - (Date.parse(d.at || "") || 0)) < 120000)
+      );
+      if (match) {
+        if (!Array.isArray(match.photos) || !match.photos.length) {
+          match.photos = d.photos;
+          changed = true;
+        }
+      } else {
+        state.ledgers.push({
+          id: d.recordId != null ? d.recordId : ("photo-" + d._docId),
+          customer: d.customer,
+          deliveryDate: d.deliveryDate || "",
+          lotNo: d.lotNo || "",
+          items: [],
+          photos: d.photos,
+          createdAt: d.at || new Date().toISOString(),
+          createdByEmail: "共有（他端末）"
+        });
+        changed = true;
+      }
+    }
+    if (changed) {
+      state.ledgers = applyLedgerRetention(state.ledgers);
+      cacheLedgers();
+    }
+    return changed;
+  } catch (e) {
+    console.warn("mergeSharedPhotosToLedgers", e);
+    return false;
+  }
+}
+
 function isActiveSession() {
   return state.demoMode || auth.currentUser;
 }
@@ -2166,6 +2293,7 @@ function selectCustomer(name) {
   loadCustomerItems(name);
   applyCycleDeliveryDate(name);
   render();
+  pullSharedPhotoDraft().then(changed => { if (changed) render(); }).catch(() => {});
 }
 
 function openItemAdd(tab = "free") {
@@ -2490,7 +2618,8 @@ async function addPhotoMemoFromFile(file) {
       ...currentPhotoMemos(),
       { id: "p" + Date.now() + Math.random().toString(36).slice(2, 6), dataUrl, takenAt: new Date().toISOString() }
     ]);
-    toast(`${state.customer} の写真メモを追加しました`);
+    await pushSharedPhotoDraft();
+    toast(`${state.customer} の写真メモを追加しました（共有）`);
     render();
   } catch (e) {
     console.error(e);
@@ -2500,6 +2629,7 @@ async function addPhotoMemoFromFile(file) {
 
 function removePhotoMemo(id) {
   setCurrentPhotoMemos(currentPhotoMemos().filter(p => p.id !== id));
+  pushSharedPhotoDraft().catch(() => {});
   render();
 }
 
@@ -2554,10 +2684,16 @@ async function saveLedger() {
       await pruneOldLedgersFromCloud();
       cacheLedgers();
     }
+    let photoShared = false;
+    if (hasPhotoMemos(record)) {
+      photoShared = await pushSharedPhotoSaved(record);
+    }
     toast(state.demoMode
       ? (IS_DEMO ? "台帳を保存しました（デモ・この端末のみ）"
-        : SKIP_LOGIN && !IS_LOCAL ? "台帳を保存しました（仮運用・この端末のみ）" : "台帳を保存しました（試用・この端末のみ）")
-      : "台帳を保存しました");
+        : SKIP_LOGIN && !IS_LOCAL
+          ? (photoShared ? "台帳を保存しました（写真は他端末・伝票と共有）" : "台帳を保存しました（仮運用・この端末のみ）")
+          : "台帳を保存しました（試用・この端末のみ）")
+      : (photoShared ? "台帳を保存しました（写真共有済み）" : "台帳を保存しました"));
     state.items = state.items.map(it => ({ ...it, inQty: "", outQty: "" }));
     setCurrentPhotoMemos([]); // 保存した客先の写真だけクリア（他客先の下書きは残す）
     state.focus = null;
@@ -3166,8 +3302,11 @@ function render() {
       state.focus = null;
       state.masterForm = null;
       state.itemAddOpen = false;
-      if (state.tab === 1 && !state.demoMode && !state.loading) {
-        try { await loadLedgersFromCloud(); } catch {}
+      if (state.tab === 1 && !state.loading) {
+        try {
+          if (!state.demoMode) await loadLedgersFromCloud();
+          await mergeSharedPhotosToLedgers();
+        } catch {}
       }
       if (state.tab === 2) {
         if (!canMasterFullEdit()) state.masterSection = "items";
@@ -3371,9 +3510,9 @@ function render() {
   if (state.tab === 1) {
     const refreshBtn = document.getElementById("btn-refresh-history");
     if (refreshBtn) refreshBtn.onclick = async () => {
-      if (state.demoMode) { render(); return; }
       try {
-        await loadLedgersFromCloud();
+        if (!state.demoMode) await loadLedgersFromCloud();
+        await mergeSharedPhotosToLedgers();
         toast("履歴を更新しました");
       } catch { toast("更新に失敗しました", "error"); }
       render();
@@ -3585,7 +3724,17 @@ window.bootApp = async function() {
   const cleared = clearLocalLedgerHistoryIfRequested();
   if (!state.deliveryDate) state.deliveryDate = todayInput();
   await loadMasters();
+  try { await mergeSharedPhotosToLedgers(); } catch {}
   if (cleared) toast("この端末の台帳履歴を消しました");
+  if (!window._photoDraftPoll) {
+    window._photoDraftPoll = setInterval(async () => {
+      if (!isActiveSession() || state.tab !== 0 || !state.customer || state.loading) return;
+      try {
+        const changed = await pullSharedPhotoDraft();
+        if (changed) render();
+      } catch {}
+    }, 20000);
+  }
   registerServiceWorkerLater();
 };
 
