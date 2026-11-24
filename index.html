@@ -2688,16 +2688,6 @@ function renderInputTab() {
               ${LOT_OPTIONS.map(n => `<option value="${n}"${state.lotNo === n ? " selected" : ""}>${n}</option>`).join("")}
             </select></div>
         </div>
-        <div class="photo-memo-bar">
-          <button type="button" class="btn btn-ghost" id="btn-photo-memo" ${state.customer ? "" : "disabled"}>📷 写真メモ${(state.photoMemos || []).length ? `（${state.photoMemos.length}）` : ""}</button>
-          <input type="file" id="photo-memo-input" accept="image/*" capture="environment" style="display:none">
-          <span class="photo-memo-hint">品名が分からないとき撮影 → 「完了して保存」で履歴に残ります（最大${PHOTO_MEMO_MAX}枚）</span>
-          <div class="photo-memo-thumbs">${(state.photoMemos || []).map(p => `
-            <div class="photo-memo-thumb">
-              <img src="${p.dataUrl}" alt="写真メモ" data-photo-view="${esc(p.id)}" data-photo-src="memo">
-              <button type="button" class="photo-del" data-photo-del="${esc(p.id)}" aria-label="写真を削除">×</button>
-            </div>`).join("")}</div>
-        </div>
       </div>
       <div class="items-panel" style="--iz:${state.itemZoom}">
         <button type="button" class="scroll-btn" id="scroll-up" aria-label="上へスクロール">▲ 上へ</button>
@@ -3128,7 +3118,19 @@ function render() {
             <button type="button" class="nk" data-k="0">0</button>
             <button type="button" class="nk enter" data-k="enter">ENTER</button>
           </div>
-          ${state.tab === 0 ? `<button type="button" class="item-add-btn" id="btn-item-add" ${state.customer ? "" : "disabled"} style="margin-top:8px;flex-shrink:0">＋ 品目を追加</button>` : ""}
+          ${state.tab === 0 ? `
+          <div style="margin-top:8px;flex-shrink:0;display:flex;flex-direction:column;gap:6px">
+            <button type="button" class="item-add-btn" id="btn-item-add" ${state.customer ? "" : "disabled"}>＋ 品目を追加</button>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <button type="button" class="btn btn-ghost" id="btn-photo-memo" title="写真メモ" aria-label="写真メモ" ${state.customer ? "" : "disabled"} style="padding:6px 10px;font-size:16px;min-width:40px;opacity:.75">${(state.photoMemos || []).length ? `📷${state.photoMemos.length}` : "📷"}</button>
+              <input type="file" id="photo-memo-input" accept="image/*" capture="environment" style="display:none">
+              <div class="photo-memo-thumbs">${(state.photoMemos || []).map(p => `
+                <div class="photo-memo-thumb" style="width:40px;height:40px">
+                  <img src="${p.dataUrl}" alt="写真メモ" data-photo-view="${esc(p.id)}" data-photo-src="memo">
+                  <button type="button" class="photo-del" data-photo-del="${esc(p.id)}" aria-label="写真を削除">×</button>
+                </div>`).join("")}</div>
+            </div>
+          </div>` : ""}
         </aside>
       </div>
     </div>
