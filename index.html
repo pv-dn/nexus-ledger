@@ -381,12 +381,12 @@ function bindInstallButtons() {
   updateInstallUi();
 }
 
-const APP_BUILD = "20261124-v61";
+const APP_BUILD = "20261124-v62";
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
   const run = async () => {
     try {
-      const reg = await navigator.serviceWorker.register("./sw.js?v=61", { updateViaCache: "none" });
+      const reg = await navigator.serviceWorker.register("./sw.js?v=62", { updateViaCache: "none" });
       try { await reg.update(); } catch {}
       if (reg.waiting) {
         try { reg.waiting.postMessage({ type: "SKIP_WAITING" }); } catch {}
@@ -654,6 +654,7 @@ function reorderCustomersInGroup(groupName, fromName, dir) {
 
 async function moveCustomer(name, dir, groupName = "") {
   if (!canMasterFullEdit()) return;
+  state.clientOrderDirty = true;
   const section = groupName || (() => {
     const c = state.customers.find(x => x.name === name);
     return c ? customerGroupName(c) : UNGROUPED_LABEL;
@@ -670,6 +671,7 @@ async function moveCustomer(name, dir, groupName = "") {
 
 async function sortCustomersByName() {
   if (!canMasterFullEdit()) return;
+  state.clientOrderDirty = true;
   // グループごとに五十音順（2所属の客先は各グループ内で名前順になるよう順に適用）
   const sections = [...state.groupOrder, UNGROUPED_LABEL];
   for (const g of sections) {
@@ -935,6 +937,27 @@ function slipV14FromLedger() {
   };
 }
 
+/** clientOrder は { [groupId]: string[] }。配列や壊れた値は捨てる */
+function normalizeClientOrderMap(co) {
+  if (!co || typeof co !== "object" || Array.isArray(co)) return {};
+  const out = {};
+  Object.keys(co).forEach(k => {
+    if (Array.isArray(co[k])) out[k] = co[k].filter(x => typeof x === "string" && x);
+  });
+  return out;
+}
+function mapClientOrderByGroupName(prevOrder, prevGroups, nextGroups) {
+  const nameToOrder = {};
+  (prevGroups || []).forEach(g => {
+    if (g && g.id && g.name && Array.isArray(prevOrder[g.id])) nameToOrder[g.name] = prevOrder[g.id];
+  });
+  const out = {};
+  (nextGroups || []).forEach(g => {
+    if (g && g.id && g.name && nameToOrder[g.name]) out[g.id] = nameToOrder[g.name].slice();
+  });
+  return out;
+}
+
 function applySlipV14ToLedger(d) {
   if (!d || !d.clients) return false;
   const groupIdToName = {};
@@ -942,6 +965,7 @@ function applySlipV14ToLedger(d) {
   const customers = [];
   const prices = [];
   let i = 0;
+  const clientOrder = normalizeClientOrderMap(d.clientOrder);
   for (const [name, cl] of Object.entries(d.clients)) {
     i += 1;
     const raw = (d.clientGroups || {})[name];
@@ -965,13 +989,13 @@ function applySlipV14ToLedger(d) {
   }
   let nextCustomers = customers.map(normalizeCustomer).filter(c => c.name);
   // 伝票側 clientOrder があれば、グループ内の順番を反映
-  if (d.clientOrder && typeof d.clientOrder === "object") {
+  if (Object.keys(clientOrder).length) {
     const byName = Object.fromEntries(nextCustomers.map(c => [c.name, c]));
     const seen = new Set();
     const ordered = [];
     for (const g of (d.groups || [])) {
       if (!g || !g.id) continue;
-      const names = Array.isArray(d.clientOrder[g.id]) ? d.clientOrder[g.id] : [];
+      const names = Array.isArray(clientOrder[g.id]) ? clientOrder[g.id] : [];
       for (const n of names) {
         if (byName[n] && !seen.has(n)) {
           ordered.push(byName[n]);
@@ -1099,6 +1123,10 @@ async function pushSharedMastersCloud() {
           next.slipCheckedAtByClosing = prev.slipCheckedAtByClosing || next.slipCheckedAtByClosing || {};
           next.slipIssuedAckIds = prev.slipIssuedAckIds || next.slipIssuedAckIds || {};
           carryClientDetails(next, prev);
+          // 伝票側にだけある客先を消さない（台帳の不完全な上書きで574→数十件になるのを防ぐ）
+          Object.keys(prev.clients || {}).forEach(name => {
+            if (!next.clients[name]) next.clients[name] = prev.clients[name];
+          });
           // 伝票で追加した商品コードも、台帳に無いだけで消えないように残す
           const prevProds = Array.isArray(prev.products) ? prev.products : [];
           const prodMap = new Map();
@@ -1109,6 +1137,15 @@ async function pushSharedMastersCloud() {
             if (!prodMap.has(k)) prodMap.set(k, p);
           });
           next.products = Array.from(prodMap.values());
+          // clientOrder: 壊れた配列は捨てる。台帳で明示的に並び替えたときだけ上書き（未並びの空を不完全な台帳順で埋めない）
+          const prevOrder = normalizeClientOrderMap(prev.clientOrder);
+          const nextOrder = normalizeClientOrderMap(next.clientOrder);
+          if (state.clientOrderDirty) {
+            next.clientOrder = nextOrder;
+          } else {
+            next.clientOrder = mapClientOrderByGroupName(prevOrder, prev.groups, next.groups);
+          }
+          state.clientOrderDirty = false;
           const prevNames = prev.clients && typeof prev.clients === "object" ? Object.keys(prev.clients) : [];
           if (prevNames.length) {
             const at = new Date().toISOString();
@@ -1393,6 +1430,7 @@ const state = {
   masterItemZoom: loadMasterItemZoom(),
   masterForm: null,
   groupOrder: [],
+  clientOrderDirty: false,
   cycles: {},
   custGroup: null, // 入力画面で選んでいるグループ（null=未設定→客先から決める、""=すべて）
   photoMemosByCustomer: {}, // 客先名 → [{ id, dataUrl, takenAt }]（選んでいる客先だけの写真）
