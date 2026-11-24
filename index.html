@@ -337,10 +337,10 @@ async function endWorkDay() {
 }
 
 const IS_LOCAL = location.hostname === "localhost" || location.hostname === "127.0.0.1";
-/** 運用開始まで true（ログイン省略・端末内保存）。本番ログイン必須にするときは false に戻す */
+/** 本番はログイン省略可。ただし demoMode にはしない（台帳同士・伝票とクラウド共有する） */
 const SKIP_LOGIN = true;
-/** ログイン省略で端末内保存にする条件（お試しURL含む） */
-const USE_LOCAL_DEMO = IS_DEMO || IS_LOCAL || SKIP_LOGIN;
+/** 本物のデモ／ローカルだけ端末内モード。本番の SKIP_LOGIN はここに入れない */
+const USE_LOCAL_DEMO = IS_DEMO || IS_LOCAL;
 const IS_IOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
 const IS_STANDALONE = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone;
 /** 想定は PC / タブレット。マスタはどちらでもフル編集可 */
@@ -381,12 +381,12 @@ function bindInstallButtons() {
   updateInstallUi();
 }
 
-const APP_BUILD = "20261124-v63";
+const APP_BUILD = "20261124-v64";
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
   const run = async () => {
     try {
-      const reg = await navigator.serviceWorker.register("./sw.js?v=63", { updateViaCache: "none" });
+      const reg = await navigator.serviceWorker.register("./sw.js?v=64", { updateViaCache: "none" });
       try { await reg.update(); } catch {}
       if (reg.waiting) {
         try { reg.waiting.postMessage({ type: "SKIP_WAITING" }); } catch {}
@@ -1676,16 +1676,15 @@ async function mergeSharedPhotosToLedgers() {
 }
 
 function isActiveSession() {
-  return state.demoMode || auth.currentUser;
+  return state.demoMode || !!auth.currentUser || (SKIP_LOGIN && !IS_DEMO && !IS_LOCAL);
 }
 
 function sessionLabel() {
   if (state.demoMode) {
     if (IS_DEMO) return "お試しデモ（本番と別・この端末のみ）";
-    return SKIP_LOGIN && !IS_LOCAL
-      ? "仮運用（ログイン省略・この端末のみ）"
-      : "試用モード（ログイン省略）";
+    return "試用モード（ログイン省略・この端末のみ）";
   }
+  if (SKIP_LOGIN && !auth.currentUser) return "本番（クラウド共有）";
   const name = state.userDisplayName || state.userShortId;
   return name ? `本日ログイン済み · ${name}` : "本日ログイン済み";
 }
@@ -3478,7 +3477,7 @@ function render() {
           ${state.tab === 0 ? `<button type="button" class="btn btn-primary" id="btn-save" style="padding:7px 14px">完了して保存</button>` : ""}
           <a class="btn btn-ghost" id="btn-guide" href="./guide.html" target="_blank" rel="noopener" style="text-decoration:none;display:inline-flex;align-items:center">ガイド</a>
           <button type="button" class="btn btn-ghost install-btn hidden" id="btn-install">インストール</button>
-          ${USE_LOCAL_DEMO && state.demoMode ? "" : `<button class="btn btn-ghost" id="btn-logout">${state.demoMode ? "終了" : "業務終了"}</button>`}
+          ${(USE_LOCAL_DEMO && state.demoMode) || (SKIP_LOGIN && !IS_DEMO) ? "" : `<button class="btn btn-ghost" id="btn-logout">${state.demoMode ? "終了" : "業務終了"}</button>`}
         </div>
       </header>
       <div class="workspace">
@@ -3923,6 +3922,16 @@ function startDemoMode() {
   window.bootApp();
 }
 
+/** 本番のログイン省略起動（デモ連動にしない・クラウド共有する） */
+function startProductionSkipLogin() {
+  state.demoMode = false;
+  if (!state.userDisplayName && !state.userShortId) {
+    state.userDisplayName = "現場";
+  }
+  markSessionDay();
+  window.bootApp();
+}
+
 /** ?clearHistory=1 でこの端末の台帳履歴（localStorage）を消す。クラウドの ledgerRecords も空なら0件になる */
 function clearLocalLedgerHistoryIfRequested() {
   try {
@@ -3968,6 +3977,7 @@ async function startApp() {
     } catch {}
   }
   onAuthStateChanged(auth, async user => {
+    // デモURL・localhost だけ端末内デモ。本番はクラウド共有
     if (USE_LOCAL_DEMO) {
       startDemoMode();
       return;
@@ -3980,6 +3990,10 @@ async function startApp() {
         clearSessionDay();
         state.userShortId = "";
         state.userDisplayName = "";
+        if (SKIP_LOGIN) {
+          startProductionSkipLogin();
+          return;
+        }
         renderLogin("日付が変わりました。朝いちどログインしてください。");
         return;
       }
@@ -3989,13 +4003,21 @@ async function startApp() {
       markSessionDay();
       state.demoMode = false;
       window.bootApp();
-    } else {
-      renderLogin();
+      return;
     }
+    if (SKIP_LOGIN) {
+      startProductionSkipLogin();
+      return;
+    }
+    renderLogin();
   }, err => {
     console.error(err);
     if (USE_LOCAL_DEMO) {
       startDemoMode();
+      return;
+    }
+    if (SKIP_LOGIN) {
+      startProductionSkipLogin();
       return;
     }
     renderLogin("接続エラーです。ネットワークを確認して再試行してください。");
