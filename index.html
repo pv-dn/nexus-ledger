@@ -145,6 +145,16 @@ select,input[type=date],input[type=text]{width:100%;padding:10px 12px;border:1px
 .badge-sent{background:#e8f5ec;color:#2d6a4f}
 .badge-draft{background:#fff3e0;color:#e65100}
 .detail-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50;display:flex;align-items:flex-end;justify-content:center;padding:16px}
+.photo-memo-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid #e6eef5}
+.photo-memo-thumbs{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.photo-memo-thumb{position:relative;width:64px;height:64px;border-radius:8px;overflow:hidden;border:1px solid #c5d6e4;background:#eef5fb;flex-shrink:0}
+.photo-memo-thumb img{width:100%;height:100%;object-fit:cover;display:block;cursor:pointer}
+.photo-memo-thumb .photo-del{position:absolute;top:2px;right:2px;width:22px;height:22px;border:none;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font-size:14px;line-height:1;cursor:pointer;padding:0}
+.photo-memo-hint{font-size:11px;color:#68849a;flex:1;min-width:140px;line-height:1.4}
+.photo-view-overlay{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:80;display:flex;align-items:center;justify-content:center;padding:16px}
+.photo-view-overlay img{max-width:min(960px,96vw);max-height:88vh;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.photo-view-close{position:absolute;top:14px;right:14px;padding:8px 14px;border:none;border-radius:8px;background:#fff;color:#1a1a2e;font-weight:700;cursor:pointer;font-size:13px}
+.history-photo-badge{display:inline-block;margin-left:6px;font-size:12px}
 .detail-panel{background:#fff;border-radius:16px 16px 0 0;width:100%;max-width:720px;max-height:85vh;overflow:auto;padding:16px}
 .detail-panel h2{font-size:18px;margin-bottom:4px}
 .detail-table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
@@ -1342,7 +1352,13 @@ const state = {
   groupOrder: [],
   cycles: {},
   custGroup: null, // 入力画面で選んでいるグループ（null=未設定→客先から決める、""=すべて）
+  photoMemos: [], // 入力中の写真メモ { id, dataUrl, takenAt }
+  photoView: null // 拡大表示中の dataUrl
 };
+
+const PHOTO_MEMO_MAX = 3;
+const PHOTO_MAX_EDGE = 960;
+const PHOTO_JPEG_Q = 0.55;
 
 function isActiveSession() {
   return state.demoMode || auth.currentUser;
@@ -2409,8 +2425,71 @@ function onAppKeyDown(e) {
 
 window.addEventListener("keydown", onAppKeyDown);
 
+/** カメラ／アルバムの画像を小さくして data URL にする（後で履歴から見られる） */
+function compressImageFile(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !String(file.type || "").startsWith("image/")) {
+      reject(new Error("画像ファイルを選んでください"));
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let w = img.width;
+      let h = img.height;
+      const edge = Math.max(w, h) || 1;
+      if (edge > PHOTO_MAX_EDGE) {
+        const s = PHOTO_MAX_EDGE / edge;
+        w = Math.max(1, Math.round(w * s));
+        h = Math.max(1, Math.round(h * s));
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL("image/jpeg", PHOTO_JPEG_Q));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("画像を開けませんでした"));
+    };
+    img.src = url;
+  });
+}
+
+async function addPhotoMemoFromFile(file) {
+  if ((state.photoMemos || []).length >= PHOTO_MEMO_MAX) {
+    toast(`写真メモは最大${PHOTO_MEMO_MAX}枚までです`, "error");
+    return;
+  }
+  try {
+    const dataUrl = await compressImageFile(file);
+    state.photoMemos = [
+      ...(state.photoMemos || []),
+      { id: "p" + Date.now() + Math.random().toString(36).slice(2, 6), dataUrl, takenAt: new Date().toISOString() }
+    ];
+    toast("写真メモを追加しました");
+    render();
+  } catch (e) {
+    console.error(e);
+    toast(e.message || "写真の取り込みに失敗しました", "error");
+  }
+}
+
+function removePhotoMemo(id) {
+  state.photoMemos = (state.photoMemos || []).filter(p => p.id !== id);
+  render();
+}
+
 function buildLedgerRecord() {
   const user = auth.currentUser;
+  const photos = (state.photoMemos || []).map(p => ({
+    id: p.id,
+    dataUrl: p.dataUrl,
+    takenAt: p.takenAt || new Date().toISOString()
+  }));
   return {
     id: Date.now(),
     customer: state.customer,
@@ -2422,6 +2501,7 @@ function buildLedgerRecord() {
       inQty: parseInt(it.inQty, 10) || 0,
       outQty: parseInt(it.outQty, 10) || 0
     })),
+    photos,
     createdAt: new Date().toISOString(),
     createdBy: user?.uid || "",
     createdByEmail: state.demoMode ? "試用モード" : (state.userDisplayName || state.userShortId || ""),
@@ -2432,12 +2512,19 @@ function hasAnyQty(record) {
   return record.items.some(it => (it.outQty > 0) || (it.inQty > 0));
 }
 
+function hasPhotoMemos(record) {
+  return Array.isArray(record?.photos) && record.photos.length > 0;
+}
+
 async function saveLedger() {
   applyBuffer();
   if (!state.customer) { toast("客先を選択してください", "error"); return; }
   if (!state.lotNo) { toast("ロット番号を選んでください", "error"); return; }
   const record = buildLedgerRecord();
-  if (!hasAnyQty(record)) { toast("数量を入力してください", "error"); return; }
+  if (!hasAnyQty(record) && !hasPhotoMemos(record)) {
+    toast("数量を入力するか、写真メモを撮ってください", "error");
+    return;
+  }
   state.ledgers = applyLedgerRetention([record, ...state.ledgers]);
   try {
     if (state.demoMode) {
@@ -2452,6 +2539,7 @@ async function saveLedger() {
         : SKIP_LOGIN && !IS_LOCAL ? "台帳を保存しました（仮運用・この端末のみ）" : "台帳を保存しました（試用・この端末のみ）")
       : "台帳を保存しました");
     state.items = state.items.map(it => ({ ...it, inQty: "", outQty: "" }));
+    state.photoMemos = [];
     state.focus = null;
     state.buffer = "";
     ensureLotPersists(); // 保存後も同じロットで続行
@@ -2460,7 +2548,8 @@ async function saveLedger() {
   } catch (e) {
     console.error(e);
     state.ledgers = state.ledgers.filter(l => l.id !== record.id);
-    toast("保存に失敗しました", "error");
+    const tooBig = /exceeds|too large|size|1MB|1048576/i.test(String(e?.message || e));
+    toast(tooBig ? "写真が大きすぎて保存できませんでした。枚数を減らして再試行してください" : "保存に失敗しました", "error");
     return null;
   }
 }
@@ -2599,6 +2688,16 @@ function renderInputTab() {
               ${LOT_OPTIONS.map(n => `<option value="${n}"${state.lotNo === n ? " selected" : ""}>${n}</option>`).join("")}
             </select></div>
         </div>
+        <div class="photo-memo-bar">
+          <button type="button" class="btn btn-ghost" id="btn-photo-memo" ${state.customer ? "" : "disabled"}>📷 写真メモ${(state.photoMemos || []).length ? `（${state.photoMemos.length}）` : ""}</button>
+          <input type="file" id="photo-memo-input" accept="image/*" capture="environment" style="display:none">
+          <span class="photo-memo-hint">品名が分からないとき撮影 → 「完了して保存」で履歴に残ります（最大${PHOTO_MEMO_MAX}枚）</span>
+          <div class="photo-memo-thumbs">${(state.photoMemos || []).map(p => `
+            <div class="photo-memo-thumb">
+              <img src="${p.dataUrl}" alt="写真メモ" data-photo-view="${esc(p.id)}" data-photo-src="memo">
+              <button type="button" class="photo-del" data-photo-del="${esc(p.id)}" aria-label="写真を削除">×</button>
+            </div>`).join("")}</div>
+        </div>
       </div>
       <div class="items-panel" style="--iz:${state.itemZoom}">
         <button type="button" class="scroll-btn" id="scroll-up" aria-label="上へスクロール">▲ 上へ</button>
@@ -2689,9 +2788,10 @@ function renderHistoryTab() {
     <thead><tr><th>納品日</th><th>客先</th><th class="num">数量</th></tr></thead>
     <tbody>${list.map(l => {
       const outSum = l.items.reduce((s, it) => s + (it.outQty || 0), 0);
+      const photoN = Array.isArray(l.photos) ? l.photos.filter(p => p && p.dataUrl).length : 0;
       return `<tr class="history-row" data-id="${esc(String(l.id))}">
         <td class="col-date">${fmtDate(l.deliveryDate)}</td>
-        <td class="col-customer">${esc(l.customer)}</td>
+        <td class="col-customer">${esc(l.customer)}${photoN ? `<span class="history-photo-badge" title="写真メモ">📷${photoN}</span>` : ""}</td>
         <td class="num">${outSum || "—"}</td>
       </tr>`;
     }).join("")}</tbody>
@@ -2937,17 +3037,37 @@ function renderDetail(ledger) {
     .filter(it => it.outQty > 0 || it.inQty > 0)
     .map(it => `<tr><td>${esc(it.name)}</td><td class="num">${it.outQty || it.inQty || "—"}</td></tr>`)
     .join("");
+  const photos = Array.isArray(ledger.photos) ? ledger.photos.filter(p => p && p.dataUrl) : [];
+  const photoBlock = photos.length
+    ? `<div style="margin:12px 0 4px">
+        <div class="lbl" style="margin-bottom:6px">写真メモ（${photos.length}）· タップで拡大</div>
+        <div class="photo-memo-thumbs">${photos.map(p => `
+          <div class="photo-memo-thumb" style="width:88px;height:88px">
+            <img src="${p.dataUrl}" alt="写真メモ" data-photo-view-url="1">
+          </div>`).join("")}</div>
+      </div>`
+    : "";
   return `
     <div class="detail-overlay" id="detail-overlay">
       <div class="detail-panel">
         <h2>${esc(ledger.customer)}</h2>
-        <p style="font-size:13px;color:#666">${fmtDate(ledger.deliveryDate)} · 保存 ${fmtDate(ledger.createdAt)} ${fmtTime(ledger.createdAt)}</p>
-        <table class="detail-table"><thead><tr><th>品名</th><th>数量</th></tr></thead><tbody>${rows}</tbody></table>
+        <p style="font-size:13px;color:#666">${fmtDate(ledger.deliveryDate)} · 保存 ${fmtDate(ledger.createdAt)} ${fmtTime(ledger.createdAt)}${ledger.lotNo ? ` · ロット ${esc(ledger.lotNo)}` : ""}</p>
+        <table class="detail-table"><thead><tr><th>品名</th><th>数量</th></tr></thead><tbody>${rows || `<tr><td colspan="2" style="color:#888">数量なし（写真メモのみ）</td></tr>`}</tbody></table>
+        ${photoBlock}
         <div class="memo-actions">
           <button class="btn btn-ghost" id="detail-delete" style="background:#fff3e0;color:#c62828">削除</button>
           <button class="btn btn-primary" id="detail-close">閉じる</button>
         </div>
       </div>
+    </div>`;
+}
+
+function renderPhotoView() {
+  if (!state.photoView) return "";
+  return `
+    <div class="photo-view-overlay" id="photo-view-overlay">
+      <button type="button" class="photo-view-close" id="photo-view-close">閉じる</button>
+      <img src="${state.photoView}" alt="写真メモ（拡大）">
     </div>`;
 }
 
@@ -3015,7 +3135,8 @@ function render() {
     ${state.detail ? renderDetail(state.detail) : ""}
     ${state.invoiceMemo ? renderInvoiceMemo(state.invoiceMemo) : ""}
     ${state.masterForm ? renderMasterForm() : ""}
-    ${state.itemAddOpen ? renderItemAddPanel() : ""}`;
+    ${state.itemAddOpen ? renderItemAddPanel() : ""}
+    ${state.photoView ? renderPhotoView() : ""}`;
 
   document.querySelectorAll(".header-tab").forEach(btn => {
     btn.onclick = async () => {
@@ -3181,6 +3302,49 @@ function render() {
   if (issueBtn) {
     issueBtn.onclick = () => { issueToSlip(); };
   }
+
+  const photoBtn = document.getElementById("btn-photo-memo");
+  const photoInput = document.getElementById("photo-memo-input");
+  if (photoBtn && photoInput) {
+    photoBtn.onclick = () => {
+      if (!state.customer) { toast("先に客先を選んでください", "error"); return; }
+      if ((state.photoMemos || []).length >= PHOTO_MEMO_MAX) {
+        toast(`写真メモは最大${PHOTO_MEMO_MAX}枚までです`, "error");
+        return;
+      }
+      photoInput.value = "";
+      photoInput.click();
+    };
+    photoInput.onchange = async () => {
+      const file = photoInput.files && photoInput.files[0];
+      if (!file) return;
+      await addPhotoMemoFromFile(file);
+      photoInput.value = "";
+    };
+  }
+  document.querySelectorAll("[data-photo-del]").forEach(btn => {
+    btn.onclick = e => {
+      e.stopPropagation();
+      removePhotoMemo(btn.dataset.photoDel);
+    };
+  });
+  document.querySelectorAll("[data-photo-view]").forEach(img => {
+    img.onclick = () => {
+      const p = (state.photoMemos || []).find(x => x.id === img.dataset.photoView);
+      if (p?.dataUrl) { state.photoView = p.dataUrl; render(); }
+    };
+  });
+  document.querySelectorAll("[data-photo-view-url]").forEach(img => {
+    img.onclick = () => {
+      if (img.src) { state.photoView = img.src; render(); }
+    };
+  });
+  const photoViewClose = document.getElementById("photo-view-close");
+  if (photoViewClose) photoViewClose.onclick = () => { state.photoView = null; render(); };
+  const photoViewOverlay = document.getElementById("photo-view-overlay");
+  if (photoViewOverlay) photoViewOverlay.onclick = e => {
+    if (e.target === photoViewOverlay) { state.photoView = null; render(); }
+  };
 
   if (state.tab === 1) {
     const refreshBtn = document.getElementById("btn-refresh-history");
