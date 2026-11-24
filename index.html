@@ -263,9 +263,10 @@ const auth = getAuth(app);
 
 const SESSION_DAY_KEY = "lg_sessionDay";
 const HISTORY_MONTHS = 2;
-const MASTER_CUST_KEY = "lg_master_customers";
-const MASTER_ITEMS_KEY = "lg_master_items";
-const MASTER_GROUP_KEY = "lg_master_groups";
+/** 端末キャッシュも自社混入版と分離 */
+const MASTER_CUST_KEY = "lg_primus_master_customers";
+const MASTER_ITEMS_KEY = "lg_primus_master_items";
+const MASTER_GROUP_KEY = "lg_primus_master_groups";
 // デモURL: https://pv-dn.github.io/primus-ledger-demo/（旧: purims-ledger-demo も可）
 // デモ運用は終了（デモ用の保存先・入口は使わない）。本番の動きは変えない。
 const IS_DEMO = false;
@@ -275,10 +276,10 @@ const MASTER_CUST_KEY_DEMO = `lg_master_customers_${DEMO_STORE}`;
 const MASTER_ITEMS_KEY_DEMO = `lg_master_items_${DEMO_STORE}`;
 const MASTER_GROUP_KEY_DEMO = `lg_master_groups_${DEMO_STORE}`;
 const LEDGERS_KEY_DEMO = `lg_ledgers_${DEMO_STORE}`;
-/** 伝票アプリと共有（同一オリジン localStorage）。デモ／本番でキー分離 */
-const BRIDGE_V14_KEY = IS_DEMO ? "purims_demo_v14" : "purims_v14";
-const BRIDGE_REV_KEY = IS_DEMO ? "purims_demo_bridge_rev" : "purims_bridge_rev";
-const BRIDGE_ISSUE_KEY = IS_DEMO ? "purims_demo_issue_pending" : "purims_issue_pending";
+/** 伝票（プリームス／門番）と共有。自社版の purims_v14 とはキーを分ける */
+const BRIDGE_V14_KEY = IS_DEMO ? "primus_demo_v14" : "primus_v14";
+const BRIDGE_REV_KEY = IS_DEMO ? "primus_demo_bridge_rev" : "primus_bridge_rev";
+const BRIDGE_ISSUE_KEY = IS_DEMO ? "primus_demo_issue_pending" : "primus_issue_pending";
 const ISSUE_PENDING_COL = IS_DEMO ? "ledgerIssuePending_demo" : "ledgerIssuePending";
 const LEDGER_PHOTOS_COL = IS_DEMO ? "ledgerPhotos_demo" : "ledgerPhotos";
 const LOT_KEY = "lg_current_lot";
@@ -978,7 +979,8 @@ function applySlipV14ToLedger(d) {
   return true;
 }
 
-const SHARED_MASTER_DOC = IS_DEMO ? "v14_demo" : "v14";
+/** 自社版と共有しない（旧 v14 は自社データが混ざったため使わない） */
+const SHARED_MASTER_DOC = IS_DEMO ? "v14_demo" : "v14_primus";
 
 function pushMastersToSlipBridge() {
   if (!IS_DEMO) return;
@@ -1802,14 +1804,19 @@ async function loadLedgersFromCloud() {
   pruneOldLedgersFromCloud().catch(() => {});
 }
 
+/** 自社データが混ざった旧キー（customers/items）とは別名にする */
+function ledgerMasterDocId(key) {
+  const map = { customers: "primus_customers", items: "primus_items", groupOrder: "primus_groupOrder" };
+  return map[key] || ("primus_" + key);
+}
 async function fsLoadLedger(key) {
-  const snap = await getDoc(doc(db, "ledgerMaster", key));
+  const snap = await getDoc(doc(db, "ledgerMaster", ledgerMasterDocId(key)));
   if (!snap.exists()) return null;
   try { return JSON.parse(snap.data().value); } catch { return null; }
 }
 
 async function fsSaveLedger(key, data) {
-  await setDoc(doc(db, "ledgerMaster", key), {
+  await setDoc(doc(db, "ledgerMaster", ledgerMasterDocId(key)), {
     value: JSON.stringify(data),
     updatedAt: new Date().toISOString()
   });
@@ -2015,19 +2022,10 @@ async function moveMasterItem(customer, index, dir) {
   }
 }
 
+/** 旧: 自社 pvdata から客先・品目を流し込んでいた。プリームス台帳では使わない */
 async function importInvoiceMasterIfEmpty() {
-  const [pvCust, pvPrices] = await Promise.all([fsLoad("customers"), fsLoad("prices")]);
-  let imported = false;
-  if (Array.isArray(pvCust) && pvCust.length) {
-    state.customers = pvCust.map(c => normalizeCustomer({ id: c.id || "", name: c.name || "", group: c.group || "", groups: c.groups })).filter(c => c.name);
-    imported = true;
-  }
-  if (Array.isArray(pvPrices) && pvPrices.length) {
-    state.prices = normalizeMasterItems(pvPrices);
-    imported = true;
-  }
-  if (imported) await persistLedgerMaster();
-  return imported;
+  console.warn("importInvoiceMasterIfEmpty: 自社pvdataの取り込みは無効化済み");
+  return false;
 }
 
 function fillDemoYomiIfMissing() {
@@ -2077,13 +2075,16 @@ async function loadLedgerMaster() {
   let groups = await fsLoadLedger("groupOrder");
   const hasMaster = (Array.isArray(customers) && customers.length) || (Array.isArray(items) && items.length);
   if (!hasMaster) {
+    // 自社 pvdata は取り込まない。空のまま開始（伝票側マスタ／手入力で埋める）
     if (loadLedgerMasterFromCache()) {
       await pushSharedMastersCloud();
       return;
     }
-    await importInvoiceMasterIfEmpty();
+    state.customers = [];
+    state.prices = [];
+    state.groupOrder = [];
     syncGroupOrderFromCustomers();
-    await pushSharedMastersCloud();
+    cacheLedgerMaster();
     return;
   }
   state.customers = Array.isArray(customers) ? customers.map(normalizeCustomer).filter(c => c.name) : [];
