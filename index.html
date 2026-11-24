@@ -77,7 +77,7 @@ select,input[type=date],input[type=text]{width:100%;padding:10px 12px;border:1px
 #delivery-date{background:#f3eef8;border-color:#c9b8de;color:#3a2a4a}
 #master-item-kana,#item-add-kana,#master-form-search-kana{background:#fff6e0;border-color:#e0c98a;color:#5a4a20}
 #master-item-query,#item-add-query,#master-form-search-query,#item-add-name,#item-add-yomi{background:#eef8f1;border-color:#9ecbb0;color:#1a3a28}
-#master-form-name,#master-form-yomi,#master-form-code,#master-form-group{background:#f7fafc;border-color:#9fc4de}
+#master-form-name,#master-form-yomi,#master-form-code,#master-form-group,#master-form-group2{background:#f7fafc;border-color:#9fc4de}
 .meta-row{display:grid;grid-template-columns:1.4fr 1fr 0.7fr;gap:10px}
 .meta-row.has-group{grid-template-columns:0.9fr 1.5fr 1fr 0.7fr}
 @media (max-width:900px){.meta-row{grid-template-columns:1fr 1fr}.meta-row.has-group{grid-template-columns:1fr 1fr}}
@@ -383,11 +383,31 @@ const DEMO_CUSTOMERS = [
 
 const UNGROUPED_LABEL = "未分類";
 
+/** 客先の所属グループ（最大2）。旧データの group 文字列も読む */
+function customerGroupsOf(c) {
+  if (Array.isArray(c?.groups) && c.groups.length) {
+    const seen = new Set();
+    const out = [];
+    for (const raw of c.groups) {
+      const g = String(raw || "").trim();
+      if (!g || g === UNGROUPED_LABEL || seen.has(g)) continue;
+      seen.add(g);
+      out.push(g);
+      if (out.length >= 2) break;
+    }
+    return out;
+  }
+  const g = (c?.group || "").trim();
+  return g && g !== UNGROUPED_LABEL ? [g] : [];
+}
+
 function normalizeCustomer(c) {
+  const groups = customerGroupsOf(c);
   return {
     id: c?.id || "",
     name: (c?.name || "").trim(),
-    group: (c?.group || "").trim(),
+    group: groups[0] || "",
+    groups,
     symbol: (c?.symbol || "").trim()
   };
 }
@@ -447,7 +467,20 @@ function applyCycleDeliveryDate(name) {
 }
 
 function customerGroupName(c) {
-  return (c?.group || "").trim() || UNGROUPED_LABEL;
+  const gs = customerGroupsOf(c);
+  return gs[0] || UNGROUPED_LABEL;
+}
+
+function customerGroupsLabel(c) {
+  const gs = customerGroupsOf(c);
+  return gs.length ? gs.join("／") : UNGROUPED_LABEL;
+}
+
+function customerBelongsToGroup(c, groupName) {
+  if (!groupName) return true;
+  const gs = customerGroupsOf(c);
+  if (!gs.length) return groupName === UNGROUPED_LABEL;
+  return gs.includes(groupName);
 }
 
 function normalizeGroupOrder(list) {
@@ -465,8 +498,7 @@ function normalizeGroupOrder(list) {
 function syncGroupOrderFromCustomers() {
   const found = new Set();
   for (const c of state.customers) {
-    const g = (c.group || "").trim();
-    if (g) found.add(g);
+    for (const g of customerGroupsOf(c)) found.add(g);
   }
   const next = normalizeGroupOrder(state.groupOrder);
   for (const g of found) {
@@ -479,7 +511,7 @@ function managedGroups() {
   syncGroupOrderFromCustomers();
   return state.groupOrder.map(name => ({
     name,
-    count: state.customers.filter(c => (c.group || "").trim() === name).length
+    count: state.customers.filter(c => customerBelongsToGroup(c, name)).length
   }));
 }
 
@@ -491,9 +523,16 @@ function customersGrouped() {
   syncGroupOrderFromCustomers();
   const map = new Map();
   for (const c of state.customers) {
-    const g = customerGroupName(c);
-    if (!map.has(g)) map.set(g, []);
-    map.get(g).push(c);
+    const gs = customerGroupsOf(c);
+    if (!gs.length) {
+      if (!map.has(UNGROUPED_LABEL)) map.set(UNGROUPED_LABEL, []);
+      map.get(UNGROUPED_LABEL).push(c);
+      continue;
+    }
+    for (const g of gs) {
+      if (!map.has(g)) map.set(g, []);
+      map.get(g).push(c);
+    }
   }
   const keys = [];
   for (const g of state.groupOrder) {
@@ -545,10 +584,12 @@ function renderCustomerGroupOptions(current = "") {
   ).join("");
 }
 
-/** 客先が属するグループ名（未登録なら空） */
+/** 客先の第1グループ名（未所属なら空。フィルタ初期値用） */
 function groupOfCustomer(name) {
   const c = state.customers.find(x => x.name === name);
-  return c ? customerGroupName(c) : "";
+  if (!c) return "";
+  const gs = customerGroupsOf(c);
+  return gs[0] || "";
 }
 
 async function moveCustomer(name, dir) {
@@ -623,14 +664,15 @@ async function moveGroup(name, dir) {
 
 async function deleteMasterGroup(name) {
   if (!canMasterFullEdit()) return;
-  const count = state.customers.filter(c => (c.group || "").trim() === name).length;
+  const count = state.customers.filter(c => customerBelongsToGroup(c, name)).length;
   const msg = count
-    ? `グループ「${name}」を削除しますか？\n所属する客先 ${count} 件は「未分類」になります。`
+    ? `グループ「${name}」を削除しますか？\n所属する客先 ${count} 件からこのグループを外します。`
     : `グループ「${name}」を削除しますか？`;
   if (!confirm(msg)) return;
-  state.customers = state.customers.map(c =>
-    (c.group || "").trim() === name ? { ...c, group: "" } : c
-  );
+  state.customers = state.customers.map(c => {
+    const groups = customerGroupsOf(c).filter(g => g !== name);
+    return normalizeCustomer({ ...c, groups, group: groups[0] || "" });
+  });
   state.groupOrder = state.groupOrder.filter(g => g !== name);
   try {
     await persistLedgerMaster();
@@ -771,8 +813,9 @@ function ensureDemoLedgers() {
 function slipV14FromLedger() {
   const groupNames = [...(state.groupOrder || [])];
   for (const c of state.customers) {
-    const g = (c.group || "").trim();
-    if (g && !groupNames.includes(g)) groupNames.push(g);
+    for (const g of customerGroupsOf(c)) {
+      if (g && !groupNames.includes(g)) groupNames.push(g);
+    }
   }
   const colors = ["#185fa5", "#0f6e56", "#854f0b", "#993556", "#534ab7", "#993c1d", "#3b6d11"];
   const groups = groupNames.map((name, i) => ({ id: "lg" + (i + 1), name, color: colors[i % colors.length] }));
@@ -783,8 +826,9 @@ function slipV14FromLedger() {
     const row = { items: [] };
     if ((c.symbol || "").trim()) row.symbol = c.symbol.trim();
     clients[c.name] = row;
-    const g = (c.group || "").trim();
-    if (g && groupIdByName[g]) clientGroups[c.name] = groupIdByName[g];
+    const ids = customerGroupsOf(c).map(g => groupIdByName[g]).filter(Boolean);
+    if (ids.length === 1) clientGroups[c.name] = ids[0];
+    else if (ids.length > 1) clientGroups[c.name] = ids;
   }
   const productsMap = new Map();
   for (const p of state.prices) {
@@ -828,12 +872,14 @@ function applySlipV14ToLedger(d) {
   let i = 0;
   for (const [name, cl] of Object.entries(d.clients)) {
     i += 1;
-    const gid = (d.clientGroups || {})[name];
-    const group = gid ? (groupIdToName[gid] || "") : "";
+    const raw = (d.clientGroups || {})[name];
+    const gids = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+    const groups = gids.map(id => groupIdToName[id] || "").filter(Boolean).slice(0, 2);
     customers.push({
       id: String(i).padStart(3, "0"),
       name,
-      group,
+      group: groups[0] || "",
+      groups,
       symbol: (cl && cl.symbol) || ""
     });
     for (const it of (cl.items || [])) {
@@ -1657,7 +1703,7 @@ async function importInvoiceMasterIfEmpty() {
   const [pvCust, pvPrices] = await Promise.all([fsLoad("customers"), fsLoad("prices")]);
   let imported = false;
   if (Array.isArray(pvCust) && pvCust.length) {
-    state.customers = pvCust.map(c => normalizeCustomer({ id: c.id || "", name: c.name || "", group: c.group || "" })).filter(c => c.name);
+    state.customers = pvCust.map(c => normalizeCustomer({ id: c.id || "", name: c.name || "", group: c.group || "", groups: c.groups })).filter(c => c.name);
     imported = true;
   }
   if (Array.isArray(pvPrices) && pvPrices.length) {
@@ -1788,11 +1834,13 @@ function openMasterCustomerForm(mode, name = "") {
     return;
   }
   const current = mode === "edit" ? state.customers.find(c => c.name === name) : null;
+  const gs = current ? customerGroupsOf(current) : [];
   state.masterForm = {
     kind: "customer",
     mode,
     name,
-    group: current?.group || "",
+    group: gs[0] || "",
+    group2: gs[1] || "",
     oldName: mode === "edit" ? name : ""
   };
   render();
@@ -1833,7 +1881,9 @@ async function submitMasterForm() {
   const name = (document.getElementById("master-form-name")?.value || "").trim();
   const codeRaw = (document.getElementById("master-form-code")?.value || "").trim();
   const yomi = normalizeYomiInput(document.getElementById("master-form-yomi")?.value || "");
-  const group = (document.getElementById("master-form-group")?.value || "").trim();
+  const group1 = (document.getElementById("master-form-group")?.value || "").trim();
+  const group2 = (document.getElementById("master-form-group2")?.value || "").trim();
+  const groupsFromForm = [...new Set([group1, group2].filter(g => g && g !== UNGROUPED_LABEL))].slice(0, 2);
   try {
     if (f.kind === "group") {
       if (!name) { toast("グループ名を入力してください", "error"); return; }
@@ -1844,24 +1894,29 @@ async function submitMasterForm() {
         state.groupOrder.push(name);
       } else {
         if (name !== f.oldName && state.groupOrder.includes(name)) { toast("同じグループがあります", "error"); return; }
-        state.customers = state.customers.map(c =>
-          (c.group || "").trim() === f.oldName ? normalizeCustomer({ ...c, group: name }) : c
-        );
+        state.customers = state.customers.map(c => {
+          const groups = customerGroupsOf(c).map(g => g === f.oldName ? name : g);
+          return normalizeCustomer({ ...c, groups, group: groups[0] || "" });
+        });
         state.groupOrder = state.groupOrder.map(g => g === f.oldName ? name : g);
       }
     } else if (f.kind === "customer") {
       if (!name) { toast("客先名を入力してください", "error"); return; }
       if (f.mode === "add") {
         if (state.customers.some(c => c.name === name)) { toast("同じ客先があります", "error"); return; }
-        state.customers.push(normalizeCustomer({ id: nextCustomerId(), name, group }));
-        if (group && !state.groupOrder.includes(group)) state.groupOrder.push(group);
+        state.customers.push(normalizeCustomer({ id: nextCustomerId(), name, groups: groupsFromForm }));
+        for (const g of groupsFromForm) {
+          if (!state.groupOrder.includes(g)) state.groupOrder.push(g);
+        }
         if (!state.masterCustomer) state.masterCustomer = name;
       } else {
         if (name !== f.oldName && state.customers.some(c => c.name === name)) { toast("同じ客先があります", "error"); return; }
         state.customers = state.customers.map(c =>
-          c.name === f.oldName ? normalizeCustomer({ ...c, name, group }) : c
+          c.name === f.oldName ? normalizeCustomer({ ...c, name, groups: groupsFromForm }) : c
         );
-        if (group && !state.groupOrder.includes(group)) state.groupOrder.push(group);
+        for (const g of groupsFromForm) {
+          if (!state.groupOrder.includes(g)) state.groupOrder.push(g);
+        }
         state.prices = state.prices.map(p => p.customer === f.oldName ? { ...p, customer: name } : p);
         if (name !== f.oldName && state.cycles && state.cycles[f.oldName] != null) {
           state.cycles[name] = state.cycles[f.oldName];
@@ -2585,7 +2640,7 @@ function renderMasterTab() {
   const custRows = grouped.map(({ group, customers }) => {
     const rows = customers.map((c, gi) => {
       const count = customerItemRows(c.name).length;
-      const gName = customerGroupName(c);
+      const gName = customerGroupsLabel(c);
       const canUp = gi > 0;
       const canDown = gi < customers.length - 1;
       return `<div class="master-row">
@@ -2788,10 +2843,12 @@ function renderMasterForm() {
         ` : ""}
         <label class="lbl">${isCustomer ? "客先名" : "品名"}</label>
         <input type="text" id="master-form-name" value="${esc(f.name)}" placeholder="${isCustomer ? "例：客先A" : "例：作業着（上）"}">
-        ${isCustomer ? `<label class="lbl">グループ（任意）</label>
+        ${isCustomer ? `<label class="lbl">グループ1（任意）</label>
         <input type="text" id="master-form-group" list="master-group-list" value="${esc(f.group || "")}" placeholder="例：医療 / 飲食 / 法人">
+        <label class="lbl">グループ2（任意・最大2つ）</label>
+        <input type="text" id="master-form-group2" list="master-group-list" value="${esc(f.group2 || "")}" placeholder="2つ目があれば入力">
         <datalist id="master-group-list">${groupOpts}</datalist>
-        <p style="font-size:11px;color:#888;margin:-4px 0 10px">グループタブで追加・改名もできます</p>` : ""}
+        <p style="font-size:11px;color:#888;margin:-4px 0 10px">最大2つまで所属できます。グループタブで追加・改名もできます</p>` : ""}
         ${!isCustomer ? `
         <label class="lbl">読み仮名（あ行検索用）</label>
         <input type="text" id="master-form-yomi" value="${esc(f.yomi || "")}" placeholder="例：さぎょうぎうえ" inputmode="kana">
