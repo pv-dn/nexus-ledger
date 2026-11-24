@@ -6,14 +6,14 @@ service cloud.firestore {
       allow read, write: if request.auth != null;
     }
 
-    // 入出荷台帳マスタ（客先・品目）
+    // 入出荷台帳マスタ（客先・品目）。ログイン省略の本番タブレットでも共有できるよう認証不要
     match /ledgerMaster/{docId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if true;
     }
 
-    // 入出荷台帳（1件ずつ保存・同時利用向け）
+    // 入出荷台帳（1件ずつ保存・同時利用向け）。ログイン省略でも台帳同士で共有
     match /ledgerRecords/{recordId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if true;
     }
 
     match /userProfiles/{userId} {

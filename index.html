@@ -381,12 +381,12 @@ function bindInstallButtons() {
   updateInstallUi();
 }
 
-const APP_BUILD = "20261124-v64";
+const APP_BUILD = "20261124-v65";
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
   const run = async () => {
     try {
-      const reg = await navigator.serviceWorker.register("./sw.js?v=64", { updateViaCache: "none" });
+      const reg = await navigator.serviceWorker.register("./sw.js?v=65", { updateViaCache: "none" });
       try { await reg.update(); } catch {}
       if (reg.waiting) {
         try { reg.waiting.postMessage({ type: "SKIP_WAITING" }); } catch {}
@@ -1875,13 +1875,25 @@ async function loadLedgersFromCloud() {
     const snap = await getDocs(q);
     state.ledgers = snap.docs.map(d => d.data());
   } catch (e) {
-    console.warn(e);
-    const q = query(collection(db, "ledgerRecords"), orderBy("createdAt", "desc"), limit(500));
-    const snap = await getDocs(q);
-    state.ledgers = applyLedgerRetention(snap.docs.map(d => d.data()));
+    console.warn("loadLedgersFromCloud primary", e);
+    try {
+      const q = query(collection(db, "ledgerRecords"), orderBy("createdAt", "desc"), limit(500));
+      const snap = await getDocs(q);
+      state.ledgers = applyLedgerRetention(snap.docs.map(d => d.data()));
+    } catch (e2) {
+      console.warn("loadLedgersFromCloud fallback", e2);
+      try {
+        const cached = localStorage.getItem("lg_ledgers");
+        state.ledgers = applyLedgerRetention(cached ? JSON.parse(cached) : []);
+      } catch {
+        state.ledgers = state.ledgers || [];
+      }
+      return false;
+    }
   }
   cacheLedgers();
   pruneOldLedgersFromCloud().catch(() => {});
+  return true;
 }
 
 /** 自社データが混ざった旧キー（customers/items）とは別名にする */
@@ -2199,11 +2211,15 @@ async function persistLedgerMaster() {
     pushMastersToSlipBridge();
   }
   if (!state.demoMode) {
-    await Promise.all([
-      fsSaveLedger("customers", state.customers),
-      fsSaveLedger("items", state.prices),
-      fsSaveLedger("groupOrder", state.groupOrder)
-    ]);
+    try {
+      await Promise.all([
+        fsSaveLedger("customers", state.customers),
+        fsSaveLedger("items", state.prices),
+        fsSaveLedger("groupOrder", state.groupOrder)
+      ]);
+    } catch (e) {
+      console.warn("fsSaveLedger", e);
+    }
   }
   await pushSharedMastersCloud();
 }
@@ -2431,13 +2447,22 @@ async function loadMasters() {
     render();
     return;
   }
+  // マスタ（伝票共有）と履歴は別扱い。履歴の権限エラーでマスタ失敗に見せない
   try {
     await loadLedgerMaster();
-    await loadLedgersFromCloud();
+    if (!state.customers.length) loadLedgerMasterFromCache();
+    if (!state.customers.length) {
+      toast("PCの伝票マスタをまだ取り込めていません。ネットを確認して再読み込みしてください", "error");
+    }
   } catch (e) {
     console.error(e);
-    toast("マスタの読込に失敗しました", "error");
     loadLedgerMasterFromCache();
+    if (!state.customers.length) toast("PCからのマスタの取り込みに失敗しました", "error");
+  }
+  try {
+    await loadLedgersFromCloud();
+  } catch (e) {
+    console.warn("履歴クラウド読込", e);
     try {
       const cached = localStorage.getItem("lg_ledgers");
       if (cached) state.ledgers = applyLedgerRetention(JSON.parse(cached));
