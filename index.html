@@ -1034,11 +1034,18 @@ function carryClientDetails(next, prev) {
       if (!(k in cl)) cl[k] = pc[k];
     }
     const prevItems = Array.isArray(pc.items) ? pc.items : [];
-    cl.items = (cl.items || []).map(it => {
+    const nextItems = (cl.items || []).map(it => {
       const pi = prevItems.find(x => x && it.code && x.code === it.code)
         || prevItems.find(x => x && x.name === it.name);
       return pi ? { ...pi, ...it } : it;
     });
+    // 伝票で追加した品目が、台帳側に無いだけで消えないように残す
+    prevItems.forEach(pi => {
+      if (!pi) return;
+      const exists = nextItems.some(it => it && ((pi.code && it.code === pi.code) || (pi.name && it.name === pi.name)));
+      if (!exists) nextItems.push(pi);
+    });
+    cl.items = nextItems;
   }
 }
 
@@ -1067,6 +1074,16 @@ async function pushSharedMastersCloud() {
           next.slipCheckedAtByClosing = prev.slipCheckedAtByClosing || next.slipCheckedAtByClosing || {};
           next.slipIssuedAckIds = prev.slipIssuedAckIds || next.slipIssuedAckIds || {};
           carryClientDetails(next, prev);
+          // 伝票で追加した商品コードも、台帳に無いだけで消えないように残す
+          const prevProds = Array.isArray(prev.products) ? prev.products : [];
+          const prodMap = new Map();
+          (next.products || []).forEach(p => { if (p && p.code) prodMap.set(String(p.code), p); });
+          prevProds.forEach(p => {
+            if (!p || !p.code) return;
+            const k = String(p.code);
+            if (!prodMap.has(k)) prodMap.set(k, p);
+          });
+          next.products = Array.from(prodMap.values());
           const prevNames = prev.clients && typeof prev.clients === "object" ? Object.keys(prev.clients) : [];
           if (prevNames.length) {
             const at = new Date().toISOString();
