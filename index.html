@@ -381,12 +381,12 @@ function bindInstallButtons() {
   updateInstallUi();
 }
 
-const APP_BUILD = "20261124-v62";
+const APP_BUILD = "20261124-v63";
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
   const run = async () => {
     try {
-      const reg = await navigator.serviceWorker.register("./sw.js?v=62", { updateViaCache: "none" });
+      const reg = await navigator.serviceWorker.register("./sw.js?v=63", { updateViaCache: "none" });
       try { await reg.update(); } catch {}
       if (reg.waiting) {
         try { reg.waiting.postMessage({ type: "SKIP_WAITING" }); } catch {}
@@ -876,15 +876,29 @@ function ensureDemoLedgers() {
   cacheLedgers();
 }
 
-function slipV14FromLedger() {
+function slipV14FromLedger(prevCloud) {
+  let prev = prevCloud && typeof prevCloud === "object" ? prevCloud : null;
+  if (!prev) {
+    try { prev = JSON.parse(localStorage.getItem(BRIDGE_V14_KEY) || "{}"); } catch { prev = {}; }
+  }
   const groupNames = [...(state.groupOrder || [])];
   for (const c of state.customers) {
     for (const g of customerGroupsOf(c)) {
       if (g && !groupNames.includes(g)) groupNames.push(g);
     }
   }
+  // 既存のグループIDを名前で引き継ぐ（lg1再採番で並び・所属が壊れるのを防ぐ）
   const colors = ["#185fa5", "#0f6e56", "#854f0b", "#993556", "#534ab7", "#993c1d", "#3b6d11"];
-  const groups = groupNames.map((name, i) => ({ id: "lg" + (i + 1), name, color: colors[i % colors.length] }));
+  const prevByName = {};
+  (Array.isArray(prev.groups) ? prev.groups : []).forEach(g => {
+    if (g && g.name) prevByName[g.name] = g;
+  });
+  const groups = groupNames.map((name, i) => {
+    if (prevByName[name] && prevByName[name].id) {
+      return { id: prevByName[name].id, name, color: prevByName[name].color || colors[i % colors.length] };
+    }
+    return { id: "lg" + Date.now() + "_" + i, name, color: colors[i % colors.length] };
+  });
   const groupIdByName = Object.fromEntries(groups.map(g => [g.name, g.id]));
   const clients = {};
   const clientGroups = {};
@@ -915,8 +929,6 @@ function slipV14FromLedger() {
       productsMap.set(p.code, { code: p.code, name: p.name, yomi: p.yomi || "" });
     }
   }
-  let prev = {};
-  try { prev = JSON.parse(localStorage.getItem(BRIDGE_V14_KEY) || "{}"); } catch {}
   const cycles = (state.cycles && Object.keys(state.cycles).length) ? state.cycles : (prev.cycles || {});
   return {
     clients,
@@ -1100,61 +1112,69 @@ function carryClientDetails(next, prev) {
 
 async function pushSharedMastersCloud() {
   try {
-    const next = slipV14FromLedger();
     const ref = doc(db, "sharedMasters", SHARED_MASTER_DOC);
     const snap = await getDoc(ref);
+    let prev = {};
+    if (snap.exists()) {
+      try { prev = JSON.parse(snap.data().value || "{}"); } catch { prev = {}; }
+    }
+    const next = slipV14FromLedger(prev);
     // 新規客先の目印（伝票アプリでお知らせを出すため）。伝票側が「設定済み」にすると消える
     const existingNew = snap.exists() && snap.data().newClients && typeof snap.data().newClients === "object"
       ? snap.data().newClients : {};
     const newClients = { ...existingNew };
-    if (snap.exists()) {
-      try {
-        const prev = JSON.parse(snap.data().value || "{}");
-        if (prev && typeof prev === "object") {
-          next.cycles = Object.keys(next.cycles || {}).length ? next.cycles : (prev.cycles || {});
-          // clientOrder は台帳の客先並びを正とする（slipV14FromLedger で組み立て済み）
-          next.closing = prev.closing || next.closing || {};
-          next.minCharge = prev.minCharge || next.minCharge || {};
-          next.deliveryFee = prev.deliveryFee || next.deliveryFee || {};
-          next.packagingFee = prev.packagingFee || next.packagingFee || {};
-          next.parkingEnabled = prev.parkingEnabled || next.parkingEnabled || {};
-          next.slipCheckedThrough = prev.slipCheckedThrough || next.slipCheckedThrough || "";
-          next.slipCheckedThroughByClosing = prev.slipCheckedThroughByClosing || next.slipCheckedThroughByClosing || {};
-          next.slipCheckedAtByClosing = prev.slipCheckedAtByClosing || next.slipCheckedAtByClosing || {};
-          next.slipIssuedAckIds = prev.slipIssuedAckIds || next.slipIssuedAckIds || {};
-          carryClientDetails(next, prev);
-          // 伝票側にだけある客先を消さない（台帳の不完全な上書きで574→数十件になるのを防ぐ）
-          Object.keys(prev.clients || {}).forEach(name => {
-            if (!next.clients[name]) next.clients[name] = prev.clients[name];
-          });
-          // 伝票で追加した商品コードも、台帳に無いだけで消えないように残す
-          const prevProds = Array.isArray(prev.products) ? prev.products : [];
-          const prodMap = new Map();
-          (next.products || []).forEach(p => { if (p && p.code) prodMap.set(String(p.code), p); });
-          prevProds.forEach(p => {
-            if (!p || !p.code) return;
-            const k = String(p.code);
-            if (!prodMap.has(k)) prodMap.set(k, p);
-          });
-          next.products = Array.from(prodMap.values());
-          // clientOrder: 壊れた配列は捨てる。台帳で明示的に並び替えたときだけ上書き（未並びの空を不完全な台帳順で埋めない）
-          const prevOrder = normalizeClientOrderMap(prev.clientOrder);
-          const nextOrder = normalizeClientOrderMap(next.clientOrder);
-          if (state.clientOrderDirty) {
-            next.clientOrder = nextOrder;
-          } else {
-            next.clientOrder = mapClientOrderByGroupName(prevOrder, prev.groups, next.groups);
-          }
-          state.clientOrderDirty = false;
-          const prevNames = prev.clients && typeof prev.clients === "object" ? Object.keys(prev.clients) : [];
-          if (prevNames.length) {
-            const at = new Date().toISOString();
-            for (const name of Object.keys(next.clients || {})) {
-              if (!prev.clients[name] && !newClients[name]) newClients[name] = at;
-            }
-          }
+    const prevCount = Object.keys(prev.clients || {}).length;
+    if (prev && typeof prev === "object" && Object.keys(prev).length) {
+      next.cycles = Object.keys(next.cycles || {}).length ? next.cycles : (prev.cycles || {});
+      next.closing = prev.closing || next.closing || {};
+      next.minCharge = prev.minCharge || next.minCharge || {};
+      next.deliveryFee = prev.deliveryFee || next.deliveryFee || {};
+      next.packagingFee = prev.packagingFee || next.packagingFee || {};
+      next.parkingEnabled = prev.parkingEnabled || next.parkingEnabled || {};
+      next.slipCheckedThrough = prev.slipCheckedThrough || next.slipCheckedThrough || "";
+      next.slipCheckedThroughByClosing = prev.slipCheckedThroughByClosing || next.slipCheckedThroughByClosing || {};
+      next.slipCheckedAtByClosing = prev.slipCheckedAtByClosing || next.slipCheckedAtByClosing || {};
+      next.slipIssuedAckIds = prev.slipIssuedAckIds || next.slipIssuedAckIds || {};
+      carryClientDetails(next, prev);
+      // 伝票側にだけある客先を消さない（不完全な上書きで件数が減るのを防ぐ）
+      Object.keys(prev.clients || {}).forEach(name => {
+        if (!next.clients[name]) next.clients[name] = prev.clients[name];
+      });
+      // 伝票だけの clientGroups も残す
+      Object.keys(prev.clientGroups || {}).forEach(name => {
+        if (next.clients[name] && next.clientGroups[name] == null && prev.clientGroups[name] != null) {
+          next.clientGroups[name] = prev.clientGroups[name];
         }
-      } catch {}
+      });
+      const prevProds = Array.isArray(prev.products) ? prev.products : [];
+      const prodMap = new Map();
+      (next.products || []).forEach(p => { if (p && p.code) prodMap.set(String(p.code), p); });
+      prevProds.forEach(p => {
+        if (!p || !p.code) return;
+        const k = String(p.code);
+        if (!prodMap.has(k)) prodMap.set(k, p);
+      });
+      next.products = Array.from(prodMap.values());
+      // clientOrder: 明示並び替えのときだけ上書き。それ以外はクラウドの並びを維持
+      const prevOrder = normalizeClientOrderMap(prev.clientOrder);
+      const nextOrder = normalizeClientOrderMap(next.clientOrder);
+      if (state.clientOrderDirty) {
+        next.clientOrder = nextOrder;
+      } else {
+        next.clientOrder = mapClientOrderByGroupName(prevOrder, prev.groups, next.groups);
+      }
+      state.clientOrderDirty = false;
+      const nextCount = Object.keys(next.clients || {}).length;
+      if (prevCount >= 50 && nextCount < prevCount * 0.5) {
+        console.error("pushSharedMastersCloud aborted: would shrink", prevCount, "->", nextCount);
+        return false;
+      }
+      if (prevCount) {
+        const at = new Date().toISOString();
+        for (const name of Object.keys(next.clients || {})) {
+          if (!prev.clients[name] && !newClients[name]) newClients[name] = at;
+        }
+      }
     }
     for (const name of Object.keys(newClients)) {
       if (!next.clients || !next.clients[name]) delete newClients[name];
@@ -2154,11 +2174,8 @@ async function loadLedgerMaster() {
   let groups = await fsLoadLedger("groupOrder");
   const hasMaster = (Array.isArray(customers) && customers.length) || (Array.isArray(items) && items.length);
   if (!hasMaster) {
-    // 自社 pvdata は取り込まない。空のまま開始（伝票側マスタ／手入力で埋める）
-    if (loadLedgerMasterFromCache()) {
-      await pushSharedMastersCloud();
-      return;
-    }
+    // 自社 pvdata は取り込まない。起動時にキャッシュをクラウドへ書き戻さない（データが勝手に変わるのを防ぐ）
+    if (loadLedgerMasterFromCache()) return;
     state.customers = [];
     state.prices = [];
     state.groupOrder = [];
@@ -2171,7 +2188,7 @@ async function loadLedgerMaster() {
   state.groupOrder = normalizeGroupOrder(groups);
   syncGroupOrderFromCustomers();
   cacheLedgerMaster();
-  await pushSharedMastersCloud();
+  // 起動時の自動 push はしない（伝票の共有マスタを潰さない）
 }
 
 async function persistLedgerMaster() {
