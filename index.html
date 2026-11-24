@@ -1377,6 +1377,8 @@ const state = {
 const PHOTO_MEMO_MAX = 3;
 const PHOTO_MAX_EDGE = 960;
 const PHOTO_JPEG_Q = 0.55;
+/** data URL の目安上限（Firestore 1ドキュメント約1MB制限対策。1枚1ドキュメントでも余裕を持つ） */
+const PHOTO_DATAURL_MAX = 220000;
 
 /** いま選んでいる客先の写真メモだけ返す */
 function currentPhotoMemos() {
@@ -1398,32 +1400,53 @@ function photoCustomerKey(name) {
   return String(name || "").trim().replace(/[\/#?[\]\s]+/g, "_").slice(0, 80) || "unknown";
 }
 
-function draftPhotoDocId(customer) {
-  return "draft_" + photoCustomerKey(customer);
+function draftPhotoDocId(customer, photoId) {
+  const pid = String(photoId || "x").replace(/[\/#?[\]\s]+/g, "_").slice(0, 40);
+  return "draft_" + photoCustomerKey(customer) + "_" + pid;
 }
 
-/** 仮運用でも台帳同士・伝票と共有するためクラウドへ上げる */
+function photoShareErrorHint(err) {
+  const msg = String(err?.message || err || "");
+  if (/exceeds|too large|size|1MB|1048576|payload/i.test(msg)) return "写真が大きすぎて共有できませんでした。もう一度取り込んでください";
+  if (/permission|insufficient|denied|Missing or insufficient/i.test(msg)) return "写真の共有権限エラーです。管理者に連絡してください";
+  if (/network|offline|Failed to get|unavailable/i.test(msg)) return "ネット接続を確認してください（写真はまだこの端末だけです）";
+  return "写真のクラウド共有に失敗しました（この端末には残っています）";
+}
+
+/** 仮運用でも台帳同士・伝票と共有。1枚＝1ドキュメント（容量超過で全部落ちないように） */
 async function pushSharedPhotoDraft() {
   const customer = (state.customer || "").trim();
-  if (!customer) return;
-  const ref = doc(db, LEDGER_PHOTOS_COL, draftPhotoDocId(customer));
-  const photos = currentPhotoMemos();
+  if (!customer) return { ok: false, reason: "no-customer" };
+  const photos = currentPhotoMemos().filter(p => p && p.dataUrl);
   try {
-    if (!photos.length) {
-      await deleteDoc(ref);
-      return;
-    }
-    await setDoc(ref, {
-      customer,
-      deliveryDate: state.deliveryDate || todayInput(),
-      lotNo: state.lotNo || "",
-      photos,
-      status: "draft",
-      at: new Date().toISOString(),
-      source: "ledger"
+    const snap = await getDocs(query(collection(db, LEDGER_PHOTOS_COL), orderBy("at", "desc"), limit(120)));
+    const existing = snap.docs.filter(d => {
+      const data = d.data() || {};
+      return data.status === "draft" && data.customer === customer;
     });
+    const keep = new Set(photos.map(p => draftPhotoDocId(customer, p.id)));
+    for (const d of existing) {
+      if (!keep.has(d.id)) {
+        try { await deleteDoc(d.ref); } catch {}
+      }
+    }
+    // 旧形式（客先1ドキュメントに全枚）も消す
+    try { await deleteDoc(doc(db, LEDGER_PHOTOS_COL, "draft_" + photoCustomerKey(customer))); } catch {}
+    for (const p of photos) {
+      await setDoc(doc(db, LEDGER_PHOTOS_COL, draftPhotoDocId(customer, p.id)), {
+        customer,
+        deliveryDate: state.deliveryDate || todayInput(),
+        lotNo: state.lotNo || "",
+        photos: [{ id: p.id, dataUrl: p.dataUrl, takenAt: p.takenAt || new Date().toISOString() }],
+        status: "draft",
+        at: p.takenAt || new Date().toISOString(),
+        source: "ledger"
+      });
+    }
+    return { ok: true, count: photos.length };
   } catch (e) {
     console.warn("pushSharedPhotoDraft", e);
+    return { ok: false, reason: e?.message || String(e), error: e };
   }
 }
 
@@ -1431,16 +1454,23 @@ async function pullSharedPhotoDraft() {
   const customer = (state.customer || "").trim();
   if (!customer) return false;
   try {
-    const snap = await getDoc(doc(db, LEDGER_PHOTOS_COL, draftPhotoDocId(customer)));
-    if (!snap.exists()) return false;
-    const d = snap.data();
-    if (d.status !== "draft" || !Array.isArray(d.photos)) return false;
+    const snap = await getDocs(query(collection(db, LEDGER_PHOTOS_COL), orderBy("at", "desc"), limit(120)));
+    const remotePhotos = [];
+    let remoteAt = 0;
+    snap.docs.forEach(d => {
+      const data = d.data() || {};
+      if (data.status !== "draft" || data.customer !== customer) return;
+      remoteAt = Math.max(remoteAt, Date.parse(data.at || "") || 0);
+      (Array.isArray(data.photos) ? data.photos : []).forEach(p => {
+        if (p && p.dataUrl && !remotePhotos.some(x => x.id === p.id)) remotePhotos.push(p);
+      });
+    });
+    if (!remotePhotos.length) return false;
     const local = currentPhotoMemos();
-    const remoteAt = Date.parse(d.at || "") || 0;
     const localAt = local.reduce((m, p) => Math.max(m, Date.parse(p.takenAt || "") || 0), 0);
     // 向こうの方が新しい、またはこっちが空なら取り込む
     if (remoteAt >= localAt || !local.length) {
-      const next = d.photos.filter(p => p && p.dataUrl).slice(0, PHOTO_MEMO_MAX);
+      const next = remotePhotos.slice(0, PHOTO_MEMO_MAX);
       const same = JSON.stringify(local.map(p => p.id)) === JSON.stringify(next.map(p => p.id));
       if (!same) {
         setCurrentPhotoMemos(next);
@@ -1456,17 +1486,30 @@ async function pullSharedPhotoDraft() {
 async function pushSharedPhotoSaved(record) {
   if (!hasPhotoMemos(record)) return false;
   try {
-    await addDoc(collection(db, LEDGER_PHOTOS_COL), {
-      customer: record.customer,
-      deliveryDate: record.deliveryDate,
-      lotNo: record.lotNo || "",
-      recordId: record.id,
-      photos: record.photos,
-      status: "saved",
-      at: record.createdAt || new Date().toISOString(),
-      source: "ledger"
-    });
-    try { await deleteDoc(doc(db, LEDGER_PHOTOS_COL, draftPhotoDocId(record.customer))); } catch {}
+    const at = record.createdAt || new Date().toISOString();
+    for (const p of (record.photos || []).filter(x => x && x.dataUrl)) {
+      await addDoc(collection(db, LEDGER_PHOTOS_COL), {
+        customer: record.customer,
+        deliveryDate: record.deliveryDate,
+        lotNo: record.lotNo || "",
+        recordId: record.id,
+        photos: [{ id: p.id, dataUrl: p.dataUrl, takenAt: p.takenAt || at }],
+        status: "saved",
+        at,
+        source: "ledger"
+      });
+    }
+    // 下書き（新形式・旧形式）を消す
+    try {
+      const snap = await getDocs(query(collection(db, LEDGER_PHOTOS_COL), orderBy("at", "desc"), limit(120)));
+      for (const d of snap.docs) {
+        const data = d.data() || {};
+        if (data.status === "draft" && data.customer === record.customer) {
+          try { await deleteDoc(d.ref); } catch {}
+        }
+      }
+    } catch {}
+    try { await deleteDoc(doc(db, LEDGER_PHOTOS_COL, "draft_" + photoCustomerKey(record.customer))); } catch {}
     return true;
   } catch (e) {
     console.warn("pushSharedPhotoSaved", e);
@@ -1477,12 +1520,36 @@ async function pushSharedPhotoSaved(record) {
 /** クラウド上の保存済み写真を履歴にマージ（タブレット同士で見えるように） */
 async function mergeSharedPhotosToLedgers() {
   try {
-    const snap = await getDocs(query(collection(db, LEDGER_PHOTOS_COL), orderBy("at", "desc"), limit(80)));
+    const snap = await getDocs(query(collection(db, LEDGER_PHOTOS_COL), orderBy("at", "desc"), limit(120)));
     const saved = snap.docs
       .map(d => ({ _docId: d.id, ...d.data() }))
       .filter(d => d.status === "saved" && Array.isArray(d.photos) && d.photos.length);
-    let changed = false;
+    // 1枚1ドキュメントを recordId / 客先+納品日+ロット でまとめる
+    const batches = new Map();
     for (const d of saved) {
+      const key = d.recordId != null
+        ? "r:" + String(d.recordId)
+        : ("c:" + d.customer + "|" + (d.deliveryDate || "") + "|" + String(d.lotNo || "") + "|" + String(d.at || "").slice(0, 16));
+      if (!batches.has(key)) {
+        batches.set(key, {
+          _docId: d._docId,
+          customer: d.customer,
+          deliveryDate: d.deliveryDate || "",
+          lotNo: d.lotNo || "",
+          recordId: d.recordId,
+          at: d.at,
+          photos: []
+        });
+      }
+      const b = batches.get(key);
+      (d.photos || []).forEach(p => {
+        if (p && p.dataUrl && !b.photos.some(x => x.id === p.id && x.dataUrl === p.dataUrl)) b.photos.push(p);
+      });
+      if (Date.parse(d.at || "") > Date.parse(b.at || "")) b.at = d.at;
+    }
+    let changed = false;
+    for (const d of batches.values()) {
+      if (!d.photos.length) continue;
       const match = state.ledgers.find(l =>
         (d.recordId != null && ledgerIdEq(l.id, d.recordId))
         || (l.customer === d.customer
@@ -1491,8 +1558,13 @@ async function mergeSharedPhotosToLedgers() {
           && Math.abs((Date.parse(l.createdAt || "") || 0) - (Date.parse(d.at || "") || 0)) < 120000)
       );
       if (match) {
-        if (!Array.isArray(match.photos) || !match.photos.length) {
-          match.photos = d.photos;
+        const have = Array.isArray(match.photos) ? match.photos : [];
+        const merged = [...have];
+        d.photos.forEach(p => {
+          if (p && p.dataUrl && !merged.some(x => x.id === p.id || x.dataUrl === p.dataUrl)) merged.push(p);
+        });
+        if (merged.length !== have.length) {
+          match.photos = merged;
           changed = true;
         }
       } else {
@@ -2586,7 +2658,7 @@ function onAppKeyDown(e) {
 
 window.addEventListener("keydown", onAppKeyDown);
 
-/** カメラ／アルバムの画像を小さくして data URL にする（後で履歴から見られる） */
+/** カメラ／アルバムの画像を小さくして data URL にする（PC取り込みでもクラウドに載るサイズへ） */
 function compressImageFile(file) {
   return new Promise((resolve, reject) => {
     if (!file || !String(file.type || "").startsWith("image/")) {
@@ -2597,20 +2669,38 @@ function compressImageFile(file) {
     const img = new Image();
     img.onload = () => {
       URL.revokeObjectURL(url);
-      let w = img.width;
-      let h = img.height;
-      const edge = Math.max(w, h) || 1;
-      if (edge > PHOTO_MAX_EDGE) {
-        const s = PHOTO_MAX_EDGE / edge;
-        w = Math.max(1, Math.round(w * s));
-        h = Math.max(1, Math.round(h * s));
-      }
       const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
       const ctx = canvas.getContext("2d");
-      ctx.drawImage(img, 0, 0, w, h);
-      resolve(canvas.toDataURL("image/jpeg", PHOTO_JPEG_Q));
+      const encode = (edge, q) => {
+        let w = img.width;
+        let h = img.height;
+        const maxE = Math.max(w, h) || 1;
+        if (maxE > edge) {
+          const s = edge / maxE;
+          w = Math.max(1, Math.round(w * s));
+          h = Math.max(1, Math.round(h * s));
+        }
+        canvas.width = w;
+        canvas.height = h;
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        return canvas.toDataURL("image/jpeg", q);
+      };
+      let edge = PHOTO_MAX_EDGE;
+      let q = PHOTO_JPEG_Q;
+      let dataUrl = encode(edge, q);
+      // PCの大きな写真でも Firestore に載るまで段階的に小さくする
+      let guard = 0;
+      while (dataUrl.length > PHOTO_DATAURL_MAX && guard < 10) {
+        guard += 1;
+        if (q > 0.38) q = Math.max(0.38, q - 0.08);
+        else {
+          edge = Math.max(420, Math.round(edge * 0.78));
+          q = 0.5;
+        }
+        dataUrl = encode(edge, q);
+      }
+      resolve(dataUrl);
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
@@ -2635,9 +2725,13 @@ async function addPhotoMemoFromFile(file) {
       ...currentPhotoMemos(),
       { id: "p" + Date.now() + Math.random().toString(36).slice(2, 6), dataUrl, takenAt: new Date().toISOString() }
     ]);
-    await pushSharedPhotoDraft();
-    toast(`${state.customer} の写真メモを追加しました（共有）`);
     render();
+    const shared = await pushSharedPhotoDraft();
+    if (shared && shared.ok) {
+      toast(`${state.customer} の写真メモを追加しました（他端末・伝票と共有）`);
+    } else {
+      toast(photoShareErrorHint(shared && shared.error), "error");
+    }
   } catch (e) {
     console.error(e);
     toast(e.message || "写真の取り込みに失敗しました", "error");
@@ -2646,7 +2740,11 @@ async function addPhotoMemoFromFile(file) {
 
 function removePhotoMemo(id) {
   setCurrentPhotoMemos(currentPhotoMemos().filter(p => p.id !== id));
-  pushSharedPhotoDraft().catch(() => {});
+  pushSharedPhotoDraft().then(shared => {
+    if (shared && !shared.ok && shared.reason !== "no-customer") {
+      toast(photoShareErrorHint(shared.error), "error");
+    }
+  }).catch(() => {});
   render();
 }
 
@@ -2694,16 +2792,26 @@ async function saveLedger() {
   }
   state.ledgers = applyLedgerRetention([record, ...state.ledgers]);
   try {
-    if (state.demoMode) {
-      cacheLedgers();
-    } else {
-      await addDoc(collection(db, "ledgerRecords"), record);
-      await pruneOldLedgersFromCloud();
-      cacheLedgers();
-    }
+    // 写真は先に共有コレクションへ（ledgerRecords に dataUrl を載せると 1MB で落ちやすい）
     let photoShared = false;
     if (hasPhotoMemos(record)) {
       photoShared = await pushSharedPhotoSaved(record);
+      if (!photoShared) {
+        toast("写真のクラウド共有に失敗しました。ネットを確認してから再保存してください", "error");
+        state.ledgers = state.ledgers.filter(l => l.id !== record.id);
+        return null;
+      }
+    }
+    if (state.demoMode) {
+      cacheLedgers();
+    } else {
+      const recordForCloud = {
+        ...record,
+        photos: (record.photos || []).map(p => ({ id: p.id, takenAt: p.takenAt || "" }))
+      };
+      await addDoc(collection(db, "ledgerRecords"), recordForCloud);
+      await pruneOldLedgersFromCloud();
+      cacheLedgers();
     }
     toast(state.demoMode
       ? (IS_DEMO ? "台帳を保存しました（デモ・この端末のみ）"
