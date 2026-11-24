@@ -2819,7 +2819,6 @@ function renderDetail(ledger) {
         <table class="detail-table"><thead><tr><th>品名</th><th>数量</th></tr></thead><tbody>${rows}</tbody></table>
         <div class="memo-actions">
           <button class="btn btn-ghost" id="detail-delete" style="background:#fff3e0;color:#c62828">削除</button>
-          <button class="btn btn-ghost" id="detail-memo" style="background:#f0ebff;color:#5b4b8a">伝票入力メモ</button>
           <button class="btn btn-primary" id="detail-close">閉じる</button>
         </div>
       </div>
@@ -2862,6 +2861,7 @@ function render() {
             <span class="zoom-label">${Math.round(state.itemZoom * 100)}%</span>
             <button type="button" class="btn btn-ghost btn-zoom" id="btn-zoom-in" aria-label="品目を拡大" ${state.itemZoom >= ZOOM_MAX ? "disabled" : ""}>＋</button>
           </div>
+          ${state.tab === 0 ? `<button type="button" class="btn btn-primary" id="btn-save" style="padding:7px 14px">完了して保存</button>` : ""}
           <a class="btn btn-ghost" id="btn-guide" href="./guide.html" target="_blank" rel="noopener" style="text-decoration:none;display:inline-flex;align-items:center">ガイド</a>
           <button type="button" class="btn btn-ghost install-btn hidden" id="btn-install">インストール</button>
           ${USE_LOCAL_DEMO && state.demoMode ? "" : `<button class="btn btn-ghost" id="btn-logout">${state.demoMode ? "終了" : "業務終了"}</button>`}
@@ -2873,9 +2873,7 @@ function render() {
         </main>
         <aside class="numpad-wrap${showNumpad ? "" : " hidden"}${state.focus ? "" : " disabled"}" aria-label="テンキー">
           <div class="sidebar-actions">
-            <button class="btn btn-primary" id="btn-save">完了して保存</button>
             <button type="button" class="btn btn-issue" id="btn-issue">伝票を発行</button>
-            <button class="btn btn-memo" id="btn-memo">伝票入力メモ</button>
           </div>
           <div class="numpad-target">${numpadHint}</div>
           <div class="numpad">
@@ -3053,12 +3051,10 @@ function render() {
 
   const saveBtn = document.getElementById("btn-save");
   const issueBtn = document.getElementById("btn-issue");
-  const memoBtn = document.getElementById("btn-memo");
   if (saveBtn) saveBtn.onclick = saveLedger;
   if (issueBtn) {
     issueBtn.onclick = () => { issueToSlip(); };
   }
-  if (memoBtn) memoBtn.onclick = showMemoFromForm;
 
   if (state.tab === 1) {
     const refreshBtn = document.getElementById("btn-refresh-history");
@@ -3230,8 +3226,6 @@ function render() {
 
   const closeBtn = document.getElementById("detail-close");
   if (closeBtn) closeBtn.onclick = () => { state.detail = null; render(); };
-  const detailMemoBtn = document.getElementById("detail-memo");
-  if (detailMemoBtn) detailMemoBtn.onclick = () => showInvoiceMemo(state.detail);
   const detailDeleteBtn = document.getElementById("detail-delete");
   if (detailDeleteBtn) detailDeleteBtn.onclick = async () => {
     const target = state.detail;
