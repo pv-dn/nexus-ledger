@@ -592,19 +592,38 @@ function groupOfCustomer(name) {
   return gs[0] || "";
 }
 
-async function moveCustomer(name, dir) {
+/** マスタ一覧のセクション（グループ名 or 未分類）に客先が属するかどうか */
+function customerInMasterSection(c, groupName) {
+  if (!groupName || groupName === UNGROUPED_LABEL) return customerGroupsOf(c).length === 0;
+  return customerBelongsToGroup(c, groupName);
+}
+
+/** 指定グループ内だけで客先の前後を入れ替える（2所属でもそのグループの見え方だけ変わる） */
+function reorderCustomersInGroup(groupName, fromName, dir) {
+  const memberNames = state.customers
+    .filter(c => customerInMasterSection(c, groupName))
+    .map(c => c.name);
+  const mi = memberNames.indexOf(fromName);
+  const mj = mi + dir;
+  if (mi < 0 || mj < 0 || mj >= memberNames.length) return false;
+  const tmp = memberNames[mi];
+  memberNames[mi] = memberNames[mj];
+  memberNames[mj] = tmp;
+  const byName = Object.fromEntries(state.customers.map(c => [c.name, c]));
+  let q = 0;
+  state.customers = state.customers.map(c =>
+    customerInMasterSection(c, groupName) ? byName[memberNames[q++]] : c
+  );
+  return true;
+}
+
+async function moveCustomer(name, dir, groupName = "") {
   if (!canMasterFullEdit()) return;
-  const i = state.customers.findIndex(c => c.name === name);
-  if (i < 0) return;
-  const group = customerGroupName(state.customers[i]);
-  let j = i + dir;
-  while (j >= 0 && j < state.customers.length) {
-    if (customerGroupName(state.customers[j]) === group) break;
-    j += dir;
-  }
-  if (j < 0 || j >= state.customers.length) return;
-  const item = state.customers.splice(i, 1)[0];
-  state.customers.splice(j, 0, item);
+  const section = groupName || (() => {
+    const c = state.customers.find(x => x.name === name);
+    return c ? customerGroupName(c) : UNGROUPED_LABEL;
+  })();
+  if (!reorderCustomersInGroup(section, name, dir)) return;
   try {
     await persistLedgerMaster();
     render();
@@ -616,10 +635,20 @@ async function moveCustomer(name, dir) {
 
 async function sortCustomersByName() {
   if (!canMasterFullEdit()) return;
-  const groups = customersGrouped();
-  state.customers = groups.flatMap(({ customers }) =>
-    [...customers].sort((a, b) => a.name.localeCompare(b.name, "ja"))
-  );
+  // グループごとに五十音順（2所属の客先は各グループ内で名前順になるよう順に適用）
+  const sections = [...state.groupOrder, UNGROUPED_LABEL];
+  for (const g of sections) {
+    const memberNames = state.customers
+      .filter(c => customerInMasterSection(c, g))
+      .map(c => c.name)
+      .sort((a, b) => a.localeCompare(b, "ja"));
+    if (memberNames.length < 2) continue;
+    const byName = Object.fromEntries(state.customers.map(c => [c.name, c]));
+    let q = 0;
+    state.customers = state.customers.map(c =>
+      customerInMasterSection(c, g) ? byName[memberNames[q++]] : c
+    );
+  }
   try {
     await persistLedgerMaster();
     toast("名前順に並べ替えました");
@@ -822,6 +851,7 @@ function slipV14FromLedger() {
   const groupIdByName = Object.fromEntries(groups.map(g => [g.name, g.id]));
   const clients = {};
   const clientGroups = {};
+  const clientOrder = {};
   for (const c of state.customers) {
     const row = { items: [] };
     if ((c.symbol || "").trim()) row.symbol = c.symbol.trim();
@@ -829,6 +859,13 @@ function slipV14FromLedger() {
     const ids = customerGroupsOf(c).map(g => groupIdByName[g]).filter(Boolean);
     if (ids.length === 1) clientGroups[c.name] = ids[0];
     else if (ids.length > 1) clientGroups[c.name] = ids;
+  }
+  // グループ内の客先順（台帳の並び）→ 伝票の clientOrder に載せる
+  for (const g of groups) {
+    const names = state.customers
+      .filter(c => customerBelongsToGroup(c, g.name))
+      .map(c => c.name);
+    if (names.length) clientOrder[g.id] = names;
   }
   const productsMap = new Map();
   for (const p of state.prices) {
@@ -850,7 +887,7 @@ function slipV14FromLedger() {
     products: [...productsMap.values()],
     groups,
     clientGroups,
-    clientOrder: prev.clientOrder || {},
+    clientOrder,
     closing: prev.closing || {},
     minCharge: prev.minCharge || {},
     deliveryFee: prev.deliveryFee || {},
@@ -891,7 +928,38 @@ function applySlipV14ToLedger(d) {
       });
     }
   }
-  state.customers = customers.map(normalizeCustomer).filter(c => c.name);
+  let nextCustomers = customers.map(normalizeCustomer).filter(c => c.name);
+  // 伝票側 clientOrder があれば、グループ内の順番を反映
+  if (d.clientOrder && typeof d.clientOrder === "object") {
+    const byName = Object.fromEntries(nextCustomers.map(c => [c.name, c]));
+    const seen = new Set();
+    const ordered = [];
+    for (const g of (d.groups || [])) {
+      if (!g || !g.id) continue;
+      const names = Array.isArray(d.clientOrder[g.id]) ? d.clientOrder[g.id] : [];
+      for (const n of names) {
+        if (byName[n] && !seen.has(n)) {
+          ordered.push(byName[n]);
+          seen.add(n);
+        }
+      }
+      const gName = g.name || groupIdToName[g.id] || "";
+      if (gName) {
+        for (const c of nextCustomers) {
+          if (seen.has(c.name)) continue;
+          if (customerBelongsToGroup(c, gName)) {
+            ordered.push(c);
+            seen.add(c.name);
+          }
+        }
+      }
+    }
+    for (const c of nextCustomers) {
+      if (!seen.has(c.name)) ordered.push(c);
+    }
+    nextCustomers = ordered;
+  }
+  state.customers = nextCustomers;
   state.prices = normalizeMasterItems(prices);
   state.groupOrder = normalizeGroupOrder((d.groups || []).map(g => g.name));
   state.cycles = (d.cycles && typeof d.cycles === "object") ? { ...d.cycles } : {};
@@ -977,7 +1045,7 @@ async function pushSharedMastersCloud() {
         const prev = JSON.parse(snap.data().value || "{}");
         if (prev && typeof prev === "object") {
           next.cycles = Object.keys(next.cycles || {}).length ? next.cycles : (prev.cycles || {});
-          next.clientOrder = Object.keys(next.clientOrder || {}).length ? next.clientOrder : (prev.clientOrder || {});
+          // clientOrder は台帳の客先並びを正とする（slipV14FromLedger で組み立て済み）
           next.closing = prev.closing || next.closing || {};
           next.minCharge = prev.minCharge || next.minCharge || {};
           next.deliveryFee = prev.deliveryFee || next.deliveryFee || {};
@@ -2649,8 +2717,8 @@ function renderMasterTab() {
         <div class="master-row-meta">品目 ${count} 件${c.id ? ` · ID ${esc(c.id)}` : ""} · ${esc(gName)}</div>
       </div>
       ${fullEdit ? `<div class="master-row-actions">
-        <button type="button" class="master-btn master-btn-move" data-master-move="${esc(c.name)}" data-dir="-1" ${canUp ? "" : "disabled"} aria-label="上へ">↑</button>
-        <button type="button" class="master-btn master-btn-move" data-master-move="${esc(c.name)}" data-dir="1" ${canDown ? "" : "disabled"} aria-label="下へ">↓</button>
+        <button type="button" class="master-btn master-btn-move" data-master-move="${esc(c.name)}" data-master-move-group="${esc(group)}" data-dir="-1" ${canUp ? "" : "disabled"} aria-label="上へ">↑</button>
+        <button type="button" class="master-btn master-btn-move" data-master-move="${esc(c.name)}" data-master-move-group="${esc(group)}" data-dir="1" ${canDown ? "" : "disabled"} aria-label="下へ">↓</button>
         <button type="button" class="master-btn master-btn-edit" data-master-customer-name="${esc(c.name)}">編集</button>
         <button type="button" class="master-btn master-btn-del" data-master-del-customer-name="${esc(c.name)}">削除</button>
       </div>` : ""}
@@ -2719,6 +2787,7 @@ function renderMasterTab() {
       <div class="master-toolbar-actions">
         <button type="button" class="master-add" id="master-add-customer">＋ 客先を追加</button>
         <button type="button" class="btn" id="master-sort-customers">名前順に並べ替え</button>
+        <span style="font-size:12px;color:#666">↑↓でグループ内の順番を変更（伝票アプリと共有）</span>
       </div>
       <div class="master-list">${custRows || `<div class="empty" style="padding:24px">客先がありません</div>`}</div>`;
   } else if (groupSection) {
@@ -3155,7 +3224,7 @@ function render() {
       btn.onclick = () => deleteMasterCustomer(btn.dataset.masterDelCustomerName);
     });
     document.querySelectorAll("[data-master-move]").forEach(btn => {
-      btn.onclick = () => moveCustomer(btn.dataset.masterMove, +btn.dataset.dir);
+      btn.onclick = () => moveCustomer(btn.dataset.masterMove, +btn.dataset.dir, btn.dataset.masterMoveGroup || "");
     });
     const addGroup = document.getElementById("master-add-group");
     if (addGroup) addGroup.onclick = () => openMasterGroupForm("add");
