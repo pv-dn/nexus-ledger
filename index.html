@@ -212,8 +212,9 @@ select,input[type=date],input[type=text]{width:100%;padding:10px 12px;border:1px
 .master-form-search-list{display:flex;flex-direction:column;gap:6px;max-height:28vh;overflow:auto;margin:0 0 12px}
 .master-form-actions{display:flex;gap:8px;margin-top:6px}
 .master-form-actions .btn{flex:1;padding:12px}
-.item-add-btn{width:100%;margin-top:8px;padding:10px;border:1px dashed #5b9bd5;border-radius:8px;background:#f0f7fc;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;color:#0288D1}
+.item-add-btn{width:100%;padding:calc(11px * var(--ui-scale, 1));border:1px dashed #5b9bd5;border-radius:8px;background:#f0f7fc;font-size:calc(13px * var(--ui-scale, 1));font-weight:700;cursor:pointer;font-family:inherit;color:#0288D1}
 .item-add-btn:disabled{opacity:.4;cursor:not-allowed}
+.sidebar-actions .item-add-btn{margin-top:2px}
 .item-add-panel{background:#fff;border-radius:16px;width:100%;max-width:520px;max-height:85vh;overflow:auto;padding:20px}
 .item-add-tabs{display:flex;gap:6px;margin-bottom:12px}
 .item-add-tab{flex:1;padding:10px;border:1px solid #9fc4de;border-radius:8px;background:#e8f3fa;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;color:#1a4a62}
@@ -2468,22 +2469,13 @@ function renderInputTab() {
                 : `<p style="font-size:11px;color:#888;margin:4px 0 0">記号・サイクル未設定</p>`;
             })()}</div>
           <div><label class="lbl">納品日${cycleOfCustomer(state.customer) ? `（${esc(cycleOfCustomer(state.customer))}）` : ""}</label>
-            <input type="date" id="delivery-date" value="${state.deliveryDate || todayInput()}">
-            ${state.customer && state.deliveryDateFromCycle
-              ? `<p style="font-size:11px;color:#888;margin:4px 0 0">入力日の次のサイクル日（手で変えられます）</p>`
-              : ""}</div>
+            <input type="date" id="delivery-date" value="${state.deliveryDate || todayInput()}"></div>
           <div><label class="lbl">ロット番号${state.lotNo ? `（${esc(state.lotNo)}で継続中）` : ""}</label>
             <select id="lot-select">
               <option value="">-- 選択 --</option>
               ${LOT_OPTIONS.map(n => `<option value="${n}"${state.lotNo === n ? " selected" : ""}>${n}</option>`).join("")}
             </select></div>
         </div>
-        <p class="sync-note" style="margin-top:6px">※ロットは<strong>切り替えるまで同じ番号のまま</strong>続きます（客先を変えても維持）。荷造り照合用に伝票へ載ります。</p>
-        <button type="button" class="item-add-btn" id="btn-item-add" ${state.customer ? "" : "disabled"}>＋ 品目を追加（自由入力 / マスタ検索）</button>
-        <p class="sync-note">${state.demoMode
-          ? (IS_DEMO ? "お試しデモ：この端末のマスタ・履歴のみ（本番と別）"
-            : SKIP_LOGIN && !IS_LOCAL ? "仮運用：この端末のマスタ・履歴のみ（運用開始後にログイン必須へ切替）" : "試用モード：この端末のマスタを使用")
-          : "台帳アプリのマスタ（全端末で共有）"}</p>
       </div>
       <div class="items-panel" style="--iz:${state.itemZoom}">
         <button type="button" class="scroll-btn" id="scroll-up" aria-label="上へスクロール">▲ 上へ</button>
@@ -2882,9 +2874,7 @@ function render() {
         <aside class="numpad-wrap${showNumpad ? "" : " hidden"}${state.focus ? "" : " disabled"}" aria-label="テンキー">
           <div class="sidebar-actions">
             <button class="btn btn-primary" id="btn-save">完了して保存</button>
-            <button type="button" class="btn btn-issue" id="btn-issue" title="PCの伝票アプリへ数量・ロットを送ります（この画面のまま）">
-              伝票を発行
-            </button>
+            <button type="button" class="btn btn-issue" id="btn-issue">伝票を発行</button>
             <button class="btn btn-memo" id="btn-memo">伝票入力メモ</button>
           </div>
           <div class="numpad-target">${numpadHint}</div>
@@ -2894,6 +2884,7 @@ function render() {
             <button type="button" class="nk" data-k="0">0</button>
             <button type="button" class="nk enter" data-k="enter">ENTER</button>
           </div>
+          ${state.tab === 0 ? `<button type="button" class="item-add-btn" id="btn-item-add" ${state.customer ? "" : "disabled"} style="margin-top:8px;flex-shrink:0">＋ 品目を追加</button>` : ""}
         </aside>
       </div>
     </div>

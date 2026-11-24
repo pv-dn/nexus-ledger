@@ -1,4 +1,4 @@
-const CACHE_NAME = "nexus-ledger-v47";
+const CACHE_NAME = "nexus-ledger-v48";
 const SHELL = [
   "./index.html",
   "./guide.html",
