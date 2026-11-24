@@ -272,9 +272,10 @@ const MASTER_GROUP_KEY = "lg_primus_master_groups";
 const IS_DEMO = false;
 /** お試しURLは trial、仮運用/ローカル試用は demo（本番クラウドと分離） */
 const DEMO_STORE = IS_DEMO ? "trial" : "demo";
-const MASTER_CUST_KEY_DEMO = `lg_master_customers_${DEMO_STORE}`;
-const MASTER_ITEMS_KEY_DEMO = `lg_master_items_${DEMO_STORE}`;
-const MASTER_GROUP_KEY_DEMO = `lg_master_groups_${DEMO_STORE}`;
+/** 仮運用キャッシュも自社混入キー（lg_master_*_demo）と分離 */
+const MASTER_CUST_KEY_DEMO = `lg_primus_master_customers_${DEMO_STORE}`;
+const MASTER_ITEMS_KEY_DEMO = `lg_primus_master_items_${DEMO_STORE}`;
+const MASTER_GROUP_KEY_DEMO = `lg_primus_master_groups_${DEMO_STORE}`;
 const LEDGERS_KEY_DEMO = `lg_ledgers_${DEMO_STORE}`;
 /** 伝票（プリームス／門番）と共有。自社版の purims_v14 とはキーを分ける */
 const BRIDGE_V14_KEY = IS_DEMO ? "primus_demo_v14" : "primus_v14";
@@ -380,12 +381,12 @@ function bindInstallButtons() {
   updateInstallUi();
 }
 
-const APP_BUILD = "20261124-v59";
+const APP_BUILD = "20261124-v60";
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
   const run = async () => {
     try {
-      const reg = await navigator.serviceWorker.register("./sw.js?v=59", { updateViaCache: "none" });
+      const reg = await navigator.serviceWorker.register("./sw.js?v=60", { updateViaCache: "none" });
       try { await reg.update(); } catch {}
       if (reg.waiting) {
         try { reg.waiting.postMessage({ type: "SKIP_WAITING" }); } catch {}
@@ -2059,7 +2060,43 @@ function fillDemoYomiIfMissing() {
   });
 }
 
+/** 自社版が端末キャッシュ／旧共有に残っているのを一度だけ消す */
+async function purgeLegacyCompanyMasterOnce() {
+  const mark = "lg_purge_company_master_v3";
+  try { if (localStorage.getItem(mark) === "1") return false; } catch {}
+  const legacyKeys = [
+    "lg_master_customers", "lg_master_items", "lg_master_groups",
+    "lg_master_customers_demo", "lg_master_items_demo", "lg_master_groups_demo",
+    "lg_master_customers_trial", "lg_master_items_trial", "lg_master_groups_trial",
+    "purims_v14", "purims_bridge_rev", "purims_issue_pending",
+    "lg_primus_master_customers", "lg_primus_master_items", "lg_primus_master_groups",
+    MASTER_CUST_KEY, MASTER_ITEMS_KEY, MASTER_GROUP_KEY,
+    MASTER_CUST_KEY_DEMO, MASTER_ITEMS_KEY_DEMO, MASTER_GROUP_KEY_DEMO,
+    BRIDGE_V14_KEY, BRIDGE_REV_KEY
+  ];
+  legacyKeys.forEach(k => { try { localStorage.removeItem(k); } catch {} });
+  state.customers = [];
+  state.prices = [];
+  state.groupOrder = [];
+  try {
+    const empty = { clients: {}, cycles: {}, products: [], groups: [], clientGroups: {}, clientOrder: {}, closing: {} };
+    await setDoc(doc(db, "sharedMasters", SHARED_MASTER_DOC), {
+      value: JSON.stringify(empty),
+      updatedAt: new Date().toISOString(),
+      updatedBy: "ledger-purge"
+    });
+  } catch (e) { console.warn("purge sharedMasters", e); }
+  try {
+    await fsSaveLedger("customers", []);
+    await fsSaveLedger("items", []);
+    await fsSaveLedger("groupOrder", []);
+  } catch (e) { console.warn("purge ledgerMaster", e); }
+  try { localStorage.setItem(mark, "1"); } catch {}
+  return true;
+}
+
 async function loadLedgerMaster() {
+  const purged = await purgeLegacyCompanyMasterOnce();
   if (state.demoMode) {
     if (IS_DEMO) {
       const pulled = pullMastersFromSlipBridge();
@@ -2077,17 +2114,19 @@ async function loadLedgerMaster() {
       await pullSharedMastersCloud();
       return;
     }
+    // 仮運用（SKIP_LOGIN）: 自社キャッシュを読まず、共有が空なら空のまま
     const fromCloud = await pullSharedMastersCloud();
     if (!fromCloud) {
       if (!loadLedgerMasterFromCache()) {
-        state.customers = DEMO_CUSTOMERS.map(c => ({ ...c }));
-        state.prices = DEMO_PRICES.map(p => ({ ...p }));
-        state.groupOrder = ["グループ1", "グループ2", "グループ3"];
+        state.customers = [];
+        state.prices = [];
+        state.groupOrder = [];
       }
     }
-    fillDemoYomiIfMissing();
     state.prices = normalizeMasterItems(state.prices);
     syncGroupOrderFromCustomers();
+    cacheLedgerMaster();
+    if (purged) toast("自社マスタの混入を削除しました（プリームス用に初期化）");
     return;
   }
   const shared = await pullSharedMastersCloud();
