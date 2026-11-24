@@ -1352,13 +1352,29 @@ const state = {
   groupOrder: [],
   cycles: {},
   custGroup: null, // 入力画面で選んでいるグループ（null=未設定→客先から決める、""=すべて）
-  photoMemos: [], // 入力中の写真メモ { id, dataUrl, takenAt }
+  photoMemosByCustomer: {}, // 客先名 → [{ id, dataUrl, takenAt }]（選んでいる客先だけの写真）
   photoView: null // 拡大表示中の dataUrl
 };
 
 const PHOTO_MEMO_MAX = 3;
 const PHOTO_MAX_EDGE = 960;
 const PHOTO_JPEG_Q = 0.55;
+
+/** いま選んでいる客先の写真メモだけ返す */
+function currentPhotoMemos() {
+  const name = (state.customer || "").trim();
+  if (!name) return [];
+  const list = state.photoMemosByCustomer?.[name];
+  return Array.isArray(list) ? list : [];
+}
+
+function setCurrentPhotoMemos(list) {
+  const name = (state.customer || "").trim();
+  if (!name) return;
+  if (!state.photoMemosByCustomer) state.photoMemosByCustomer = {};
+  if (!list || !list.length) delete state.photoMemosByCustomer[name];
+  else state.photoMemosByCustomer[name] = list;
+}
 
 function isActiveSession() {
   return state.demoMode || auth.currentUser;
@@ -2460,17 +2476,21 @@ function compressImageFile(file) {
 }
 
 async function addPhotoMemoFromFile(file) {
-  if ((state.photoMemos || []).length >= PHOTO_MEMO_MAX) {
-    toast(`写真メモは最大${PHOTO_MEMO_MAX}枚までです`, "error");
+  if (!(state.customer || "").trim()) {
+    toast("先に客先を選んでください", "error");
+    return;
+  }
+  if (currentPhotoMemos().length >= PHOTO_MEMO_MAX) {
+    toast(`この客先の写真メモは最大${PHOTO_MEMO_MAX}枚までです`, "error");
     return;
   }
   try {
     const dataUrl = await compressImageFile(file);
-    state.photoMemos = [
-      ...(state.photoMemos || []),
+    setCurrentPhotoMemos([
+      ...currentPhotoMemos(),
       { id: "p" + Date.now() + Math.random().toString(36).slice(2, 6), dataUrl, takenAt: new Date().toISOString() }
-    ];
-    toast("写真メモを追加しました");
+    ]);
+    toast(`${state.customer} の写真メモを追加しました`);
     render();
   } catch (e) {
     console.error(e);
@@ -2479,13 +2499,13 @@ async function addPhotoMemoFromFile(file) {
 }
 
 function removePhotoMemo(id) {
-  state.photoMemos = (state.photoMemos || []).filter(p => p.id !== id);
+  setCurrentPhotoMemos(currentPhotoMemos().filter(p => p.id !== id));
   render();
 }
 
 function buildLedgerRecord() {
   const user = auth.currentUser;
-  const photos = (state.photoMemos || []).map(p => ({
+  const photos = currentPhotoMemos().map(p => ({
     id: p.id,
     dataUrl: p.dataUrl,
     takenAt: p.takenAt || new Date().toISOString()
@@ -2539,7 +2559,7 @@ async function saveLedger() {
         : SKIP_LOGIN && !IS_LOCAL ? "台帳を保存しました（仮運用・この端末のみ）" : "台帳を保存しました（試用・この端末のみ）")
       : "台帳を保存しました");
     state.items = state.items.map(it => ({ ...it, inQty: "", outQty: "" }));
-    state.photoMemos = [];
+    setCurrentPhotoMemos([]); // 保存した客先の写真だけクリア（他客先の下書きは残す）
     state.focus = null;
     state.buffer = "";
     ensureLotPersists(); // 保存後も同じロットで続行
@@ -3122,9 +3142,9 @@ function render() {
           <div style="margin-top:8px;flex-shrink:0;display:flex;flex-direction:column;gap:6px">
             <button type="button" class="item-add-btn" id="btn-item-add" ${state.customer ? "" : "disabled"}>＋ 品目を追加</button>
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-              <button type="button" class="btn btn-ghost" id="btn-photo-memo" title="写真メモ" aria-label="写真メモ" ${state.customer ? "" : "disabled"} style="padding:6px 10px;font-size:16px;min-width:40px;opacity:.75">${(state.photoMemos || []).length ? `📷${state.photoMemos.length}` : "📷"}</button>
+              <button type="button" class="btn btn-ghost" id="btn-photo-memo" title="この客先の写真メモ" aria-label="写真メモ" ${state.customer ? "" : "disabled"} style="padding:6px 10px;font-size:16px;min-width:40px;opacity:.75">${currentPhotoMemos().length ? `📷${currentPhotoMemos().length}` : "📷"}</button>
               <input type="file" id="photo-memo-input" accept="image/*" capture="environment" style="display:none">
-              <div class="photo-memo-thumbs">${(state.photoMemos || []).map(p => `
+              <div class="photo-memo-thumbs">${currentPhotoMemos().map(p => `
                 <div class="photo-memo-thumb" style="width:40px;height:40px">
                   <img src="${p.dataUrl}" alt="写真メモ" data-photo-view="${esc(p.id)}" data-photo-src="memo">
                   <button type="button" class="photo-del" data-photo-del="${esc(p.id)}" aria-label="写真を削除">×</button>
@@ -3310,8 +3330,8 @@ function render() {
   if (photoBtn && photoInput) {
     photoBtn.onclick = () => {
       if (!state.customer) { toast("先に客先を選んでください", "error"); return; }
-      if ((state.photoMemos || []).length >= PHOTO_MEMO_MAX) {
-        toast(`写真メモは最大${PHOTO_MEMO_MAX}枚までです`, "error");
+      if (currentPhotoMemos().length >= PHOTO_MEMO_MAX) {
+        toast(`この客先の写真メモは最大${PHOTO_MEMO_MAX}枚までです`, "error");
         return;
       }
       photoInput.value = "";
@@ -3332,7 +3352,7 @@ function render() {
   });
   document.querySelectorAll("[data-photo-view]").forEach(img => {
     img.onclick = () => {
-      const p = (state.photoMemos || []).find(x => x.id === img.dataset.photoView);
+      const p = currentPhotoMemos().find(x => x.id === img.dataset.photoView);
       if (p?.dataUrl) { state.photoView = p.dataUrl; render(); }
     };
   });
