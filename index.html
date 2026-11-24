@@ -380,11 +380,33 @@ function bindInstallButtons() {
   updateInstallUi();
 }
 
+const APP_BUILD = "20261124-v59";
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
-  const run = () => navigator.serviceWorker.register("./sw.js?v=23", { updateViaCache: "none" }).catch(() => {});
-  if ("requestIdleCallback" in window) requestIdleCallback(run, { timeout: 5000 });
-  else setTimeout(run, 3000);
+  const run = async () => {
+    try {
+      const reg = await navigator.serviceWorker.register("./sw.js?v=59", { updateViaCache: "none" });
+      try { await reg.update(); } catch {}
+      if (reg.waiting) {
+        try { reg.waiting.postMessage({ type: "SKIP_WAITING" }); } catch {}
+      }
+      reg.addEventListener("updatefound", () => {
+        const sw = reg.installing;
+        if (!sw) return;
+        sw.addEventListener("statechange", () => {
+          if (sw.state === "installed" && navigator.serviceWorker.controller) {
+            try { sessionStorage.setItem("lg_sw_updated", "1"); } catch {}
+          }
+        });
+      });
+    } catch {}
+  };
+  setTimeout(run, 200);
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (window._lgReloading) return;
+    window._lgReloading = true;
+    location.reload();
+  });
 }
 
 const DEMO_CUSTOMERS = [
@@ -3362,7 +3384,7 @@ function render() {
     <div class="app">
       ${IS_DEMO ? `<div class="demo-banner">⚠ お試し（デモ）環境です。伝票デモとマスタ連動中・この端末のみ。</div>` : ""}
       <header class="header">
-        <div class="header-brand"><h1>${IS_DEMO ? "【デモ】入出荷台帳" : "入出荷台帳"}</h1><div class="header-sub">${esc(sessionLabel())}${state.lotNo ? ` · ロット ${esc(state.lotNo)}` : " · ロット未選択"}</div>${pcLinkBadgeHtml()}</div>
+        <div class="header-brand"><h1>${IS_DEMO ? "【デモ】入出荷台帳" : "入出荷台帳"}</h1><div class="header-sub">${esc(sessionLabel())}${state.lotNo ? ` · ロット ${esc(state.lotNo)}` : " · ロット未選択"} · <span style="opacity:.55">${APP_BUILD}</span></div>${pcLinkBadgeHtml()}</div>
         <nav class="header-tabs" aria-label="画面切替">
           <button type="button" class="header-tab${state.tab === 0 ? " active" : ""}" data-tab="0">入力</button>
           <button type="button" class="header-tab${state.tab === 1 ? " active" : ""}" data-tab="1">履歴${state.ledgers.length ? ` (${state.ledgers.length})` : ""}</button>

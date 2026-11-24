@@ -1,4 +1,4 @@
-const CACHE_NAME = "nexus-ledger-v58";
+const CACHE_NAME = "nexus-ledger-v59";
 const SHELL = [
   "./index.html",
   "./guide.html",
@@ -21,6 +21,10 @@ self.addEventListener("activate", event => {
       .then(keys => Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))))
       .then(() => self.clients.claim())
   );
+});
+
+self.addEventListener("message", event => {
+  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
 });
 
 function isNavigation(request) {
