@@ -167,6 +167,10 @@ select,input[type=date],input[type=text]{width:100%;padding:10px 12px;border:1px
 .paper-scan-video-wrap{position:relative;background:#111;border-radius:8px;overflow:hidden;min-height:240px}
 .paper-scan-video{width:100%;max-height:52vh;display:block;background:#000;object-fit:cover}
 .paper-scan-cam-hint{position:absolute;left:0;right:0;bottom:0;padding:8px 10px;background:rgba(0,0,0,.55);color:#fff;font-size:12px;line-height:1.4}
+.btn-paper-scan{width:100%;padding:18px 14px;border:none;border-radius:12px;background:#0277BD;color:#fff;font-size:17px;font-weight:800;line-height:1.35;cursor:pointer;font-family:inherit;box-shadow:0 3px 10px rgba(2,119,189,.4)}
+.btn-paper-scan:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+.btn-paper-scan:active:not(:disabled){transform:scale(.98)}
+.btn-paper-scan small{display:block;font-size:12px;font-weight:600;opacity:.92;margin-top:4px}
 .detail-panel{background:#fff;border-radius:16px 16px 0 0;width:100%;max-width:720px;max-height:85vh;overflow:auto;padding:16px}
 .detail-panel h2{font-size:18px;margin-bottom:4px}
 .detail-table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
@@ -393,12 +397,12 @@ function bindInstallButtons() {
   updateInstallUi();
 }
 
-const APP_BUILD = "20261126-v67";
+const APP_BUILD = "20261126-v69";
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
   const run = async () => {
     try {
-      const reg = await navigator.serviceWorker.register("./sw.js?v=67", { updateViaCache: "none" });
+      const reg = await navigator.serviceWorker.register("./sw.js?v=69", { updateViaCache: "none" });
       try { await reg.update(); } catch {}
       if (reg.waiting) {
         try { reg.waiting.postMessage({ type: "SKIP_WAITING" }); } catch {}
@@ -3806,6 +3810,11 @@ function render() {
           ${state.loading ? `<div class="empty">読込中…</div>` : state.tab === 0 ? renderInputTab() : `<div class="main-scroll">${state.tab === 1 ? renderHistoryTab() : renderMasterTab()}</div>`}
         </main>
         <aside class="numpad-wrap${showNumpad ? "" : " hidden"}${state.focus ? "" : " disabled"}" aria-label="テンキー">
+          ${state.tab === 0 ? `
+          <div style="flex-shrink:0;margin-bottom:8px">
+            <button type="button" class="btn-paper-scan" id="btn-paper-scan" title="手書き台帳をカメラで撮って、点数を自動入力します" ${state.customer && state.items.length ? "" : "disabled"}>📷 手書き台帳を撮る<small>点数が自動で入ります（あとで確認）</small></button>
+            <input type="file" id="paper-scan-input" accept="image/*" capture="environment" style="display:none">
+          </div>` : ""}
           <div class="sidebar-actions">
             <button type="button" class="btn btn-issue" id="btn-issue">伝票を発行</button>
           </div>
@@ -3817,11 +3826,9 @@ function render() {
             <button type="button" class="nk enter" data-k="enter">ENTER</button>
           </div>
           ${state.tab === 0 ? `
-          <div style="margin-top:8px;flex-shrink:0;display:flex;flex-direction:column;gap:6px">
+          <div style="margin-top:8px;flex-shrink:0;display:flex;flex-direction:column;gap:8px">
             <button type="button" class="item-add-btn" id="btn-item-add" ${state.customer ? "" : "disabled"}>＋ 品目を追加</button>
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-              <button type="button" class="btn btn-ghost" id="btn-paper-scan" title="手書き台帳の点数をカメラで読む" ${state.customer && state.items.length ? "" : "disabled"} style="padding:6px 10px;font-size:12px;font-weight:700">📄 紙の点数</button>
-              <input type="file" id="paper-scan-input" accept="image/*" capture="environment" style="display:none">
               <button type="button" class="btn btn-ghost" id="btn-photo-memo" title="この客先の写真メモ" aria-label="写真メモ" ${state.customer ? "" : "disabled"} style="padding:6px 10px;font-size:16px;min-width:40px;opacity:.75">${currentPhotoMemos().length ? `📷${currentPhotoMemos().length}` : "📷"}</button>
               <input type="file" id="photo-memo-input" accept="image/*" capture="environment" style="display:none">
               <div class="photo-memo-thumbs">${currentPhotoMemos().map(p => `
