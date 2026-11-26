@@ -164,6 +164,9 @@ select,input[type=date],input[type=text]{width:100%;padding:10px 12px;border:1px
 .paper-scan-row{display:grid;grid-template-columns:1fr 88px;gap:8px;align-items:center;padding:6px 8px;border:1px solid #e2ebf2;border-radius:8px;background:#fafcfd}
 .paper-scan-row input{width:100%;padding:8px;font-size:16px;font-weight:700;text-align:right;border:1px solid #9fc4de;border-radius:6px}
 .paper-scan-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;margin-top:14px}
+.paper-scan-video-wrap{position:relative;background:#111;border-radius:8px;overflow:hidden;min-height:240px}
+.paper-scan-video{width:100%;max-height:52vh;display:block;background:#000;object-fit:cover}
+.paper-scan-cam-hint{position:absolute;left:0;right:0;bottom:0;padding:8px 10px;background:rgba(0,0,0,.55);color:#fff;font-size:12px;line-height:1.4}
 .detail-panel{background:#fff;border-radius:16px 16px 0 0;width:100%;max-width:720px;max-height:85vh;overflow:auto;padding:16px}
 .detail-panel h2{font-size:18px;margin-bottom:4px}
 .detail-table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
@@ -390,12 +393,12 @@ function bindInstallButtons() {
   updateInstallUi();
 }
 
-const APP_BUILD = "20261126-v66";
+const APP_BUILD = "20261126-v67";
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
   const run = async () => {
     try {
-      const reg = await navigator.serviceWorker.register("./sw.js?v=66", { updateViaCache: "none" });
+      const reg = await navigator.serviceWorker.register("./sw.js?v=67", { updateViaCache: "none" });
       try { await reg.update(); } catch {}
       if (reg.waiting) {
         try { reg.waiting.postMessage({ type: "SKIP_WAITING" }); } catch {}
@@ -1567,6 +1570,13 @@ async function ocrPaperTensuFromDataUrl(dataUrl, itemNames, onProgress) {
   }
   return rows;
 }
+let _paperScanStream = null;
+function stopPaperScanCamera() {
+  try {
+    (_paperScanStream?.getTracks?.() || []).forEach(t => t.stop());
+  } catch {}
+  _paperScanStream = null;
+}
 function openPaperScanPicker() {
   if (!state.customer) {
     toast("先に客先を選んでください", "error");
@@ -1576,6 +1586,61 @@ function openPaperScanPicker() {
     toast("この客先に品目がありません", "error");
     return;
   }
+  stopPaperScanCamera();
+  const names = state.items.map(it => it.name);
+  state.paperScan = {
+    phase: "camera",
+    busy: false,
+    progress: 0,
+    imageUrl: "",
+    camError: "",
+    rows: names.map(name => ({ name, qty: "", raw: "" }))
+  };
+  render();
+  startPaperScanCamera();
+}
+async function startPaperScanCamera() {
+  if (!state.paperScan || state.paperScan.phase !== "camera") return;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    state.paperScan.camError = "この端末ではカメラを直接開けません。下の「画像ファイルから選ぶ」を使ってください";
+    render();
+    return;
+  }
+  try {
+    _paperScanStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      }
+    });
+    const video = document.getElementById("paper-scan-video");
+    if (video) {
+      video.srcObject = _paperScanStream;
+      await video.play().catch(() => {});
+    }
+  } catch (e) {
+    console.warn(e);
+    state.paperScan.camError = "カメラを開けませんでした。権限を許可するか、「画像ファイルから選ぶ」を使ってください";
+    render();
+  }
+}
+function capturePaperScanFromVideo() {
+  const video = document.getElementById("paper-scan-video");
+  if (!video || !video.videoWidth) {
+    toast("カメラ準備中です。少し待ってから撮ってください", "error");
+    return;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+  stopPaperScanCamera();
+  startPaperScanFromDataUrl(dataUrl);
+}
+function pickPaperScanFile() {
   const input = document.getElementById("paper-scan-input");
   if (!input) return;
   input.value = "";
@@ -1583,18 +1648,27 @@ function openPaperScanPicker() {
 }
 async function startPaperScanFromFile(file) {
   if (!file) return;
+  const dataUrl = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ""));
+    r.onerror = () => reject(new Error("画像の読込に失敗しました"));
+    r.readAsDataURL(file);
+  });
+  stopPaperScanCamera();
+  await startPaperScanFromDataUrl(dataUrl);
+}
+async function startPaperScanFromDataUrl(dataUrl) {
   const names = state.items.map(it => it.name);
-  state.paperScan = { busy: true, progress: 0, imageUrl: "", rows: names.map(name => ({ name, qty: "", raw: "" })) };
+  state.paperScan = {
+    phase: "ocr",
+    busy: true,
+    progress: 0,
+    imageUrl: dataUrl,
+    camError: "",
+    rows: names.map(name => ({ name, qty: "", raw: "" }))
+  };
   render();
   try {
-    const dataUrl = await new Promise((resolve, reject) => {
-      const r = new FileReader();
-      r.onload = () => resolve(String(r.result || ""));
-      r.onerror = () => reject(new Error("画像の読込に失敗しました"));
-      r.readAsDataURL(file);
-    });
-    state.paperScan.imageUrl = dataUrl;
-    render();
     const rows = await ocrPaperTensuFromDataUrl(dataUrl, names, p => {
       if (state.paperScan) {
         state.paperScan.progress = p;
@@ -1602,7 +1676,7 @@ async function startPaperScanFromFile(file) {
         if (el) el.textContent = `読み取り中… ${Math.round(p * 100)}%`;
       }
     });
-    state.paperScan = { busy: false, progress: 1, imageUrl: dataUrl, rows };
+    state.paperScan = { phase: "review", busy: false, progress: 1, imageUrl: dataUrl, camError: "", rows };
     render();
     toast("読み取り結果を確認してください");
   } catch (e) {
@@ -1611,6 +1685,11 @@ async function startPaperScanFromFile(file) {
     render();
     toast(e.message || "紙の読み取りに失敗しました", "error");
   }
+}
+function closePaperScan() {
+  stopPaperScanCamera();
+  state.paperScan = null;
+  render();
 }
 function applyPaperScanToItems() {
   if (!state.paperScan || !Array.isArray(state.paperScan.rows)) return;
@@ -1624,7 +1703,7 @@ function applyPaperScanToItems() {
     filled += 1;
     return { ...it, outQty: q };
   });
-  state.paperScan = null;
+  closePaperScan();
   state.focus = null;
   state.buffer = "";
   render();
@@ -1633,6 +1712,26 @@ function applyPaperScanToItems() {
 function renderPaperScanModal() {
   const ps = state.paperScan;
   if (!ps) return "";
+  if (ps.phase === "camera") {
+    return `
+    <div class="paper-scan-overlay" id="paper-scan-overlay">
+      <div class="paper-scan-panel" role="dialog" aria-label="紙台帳を撮影">
+        <h3 style="font-size:17px;margin:0 0 6px">紙の点数を撮影</h3>
+        <p style="font-size:12px;color:#5a7a90;margin:0 0 12px;line-height:1.5">
+          客先「${esc(state.customer)}」の紙を、1件ぶんだけ真上から枠に入れて撮影してください。
+        </p>
+        <div class="paper-scan-video-wrap">
+          <video id="paper-scan-video" class="paper-scan-video" playsinline muted autoplay></video>
+          <div class="paper-scan-cam-hint">${ps.camError ? esc(ps.camError) : "点数列が入るように合わせて「シャッター」"}</div>
+        </div>
+        <div class="paper-scan-actions">
+          <button type="button" class="btn btn-ghost" id="paper-scan-cancel">キャンセル</button>
+          <button type="button" class="btn btn-ghost" id="paper-scan-pick-file">画像ファイルから選ぶ</button>
+          <button type="button" class="btn btn-primary" id="paper-scan-shutter" ${ps.camError ? "disabled" : ""}>シャッター</button>
+        </div>
+      </div>
+    </div>`;
+  }
   const rows = (ps.rows || []).map((r, i) => `
     <div class="paper-scan-row">
       <div style="font-size:13px;font-weight:700">${esc(r.name)}</div>
@@ -1643,7 +1742,7 @@ function renderPaperScanModal() {
       <div class="paper-scan-panel" role="dialog" aria-label="紙台帳の点数読み取り">
         <h3 style="font-size:17px;margin:0 0 6px">紙の点数を読み取り</h3>
         <p style="font-size:12px;color:#5a7a90;margin:0 0 12px;line-height:1.5">
-          客先「${esc(state.customer)}」の品目順で点数列を読みます。1客先ぶんだけ枠に入れて撮ってください。結果は必ず確認してから反映。
+          客先「${esc(state.customer)}」の品目順で点数列を読みます。結果は必ず確認してから反映。
         </p>
         <div class="paper-scan-grid">
           <div>
@@ -3923,7 +4022,11 @@ function render() {
   }
   if (state.paperScan) {
     const cancel = document.getElementById("paper-scan-cancel");
-    if (cancel) cancel.onclick = () => { state.paperScan = null; render(); };
+    if (cancel) cancel.onclick = () => closePaperScan();
+    const shutter = document.getElementById("paper-scan-shutter");
+    if (shutter) shutter.onclick = () => capturePaperScanFromVideo();
+    const pickFile = document.getElementById("paper-scan-pick-file");
+    if (pickFile) pickFile.onclick = () => pickPaperScanFile();
     const apply = document.getElementById("paper-scan-apply");
     if (apply) apply.onclick = () => {
       document.querySelectorAll("[data-paper-qty]").forEach(inp => {
@@ -3934,8 +4037,15 @@ function render() {
     };
     const overlay = document.getElementById("paper-scan-overlay");
     if (overlay) overlay.onclick = e => {
-      if (e.target === overlay && !state.paperScan.busy) { state.paperScan = null; render(); }
+      if (e.target === overlay && !state.paperScan.busy) closePaperScan();
     };
+    if (state.paperScan.phase === "camera" && _paperScanStream) {
+      const video = document.getElementById("paper-scan-video");
+      if (video && video.srcObject !== _paperScanStream) {
+        video.srcObject = _paperScanStream;
+        video.play().catch(() => {});
+      }
+    }
   }
 
   const photoBtn = document.getElementById("btn-photo-memo");
