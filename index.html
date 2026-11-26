@@ -155,6 +155,15 @@ select,input[type=date],input[type=text]{width:100%;padding:10px 12px;border:1px
 .photo-view-overlay img{max-width:min(960px,96vw);max-height:88vh;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
 .photo-view-close{position:absolute;top:14px;right:14px;padding:8px 14px;border:none;border-radius:8px;background:#fff;color:#1a1a2e;font-weight:700;cursor:pointer;font-size:13px}
 .history-photo-badge{display:inline-block;margin-left:6px;font-size:12px}
+.paper-scan-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:90;display:flex;align-items:center;justify-content:center;padding:12px}
+.paper-scan-panel{background:#fff;border-radius:12px;width:min(920px,96vw);max-height:92vh;overflow:auto;padding:16px 18px;box-shadow:0 12px 40px rgba(0,0,0,.28)}
+.paper-scan-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:800px){.paper-scan-grid{grid-template-columns:1fr}}
+.paper-scan-preview{width:100%;border:1px solid #c5d6e4;border-radius:8px;background:#f4f8fb;max-height:52vh;object-fit:contain}
+.paper-scan-rows{display:flex;flex-direction:column;gap:6px;max-height:52vh;overflow:auto}
+.paper-scan-row{display:grid;grid-template-columns:1fr 88px;gap:8px;align-items:center;padding:6px 8px;border:1px solid #e2ebf2;border-radius:8px;background:#fafcfd}
+.paper-scan-row input{width:100%;padding:8px;font-size:16px;font-weight:700;text-align:right;border:1px solid #9fc4de;border-radius:6px}
+.paper-scan-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;margin-top:14px}
 .detail-panel{background:#fff;border-radius:16px 16px 0 0;width:100%;max-width:720px;max-height:85vh;overflow:auto;padding:16px}
 .detail-panel h2{font-size:18px;margin-bottom:4px}
 .detail-table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
@@ -381,12 +390,12 @@ function bindInstallButtons() {
   updateInstallUi();
 }
 
-const APP_BUILD = "20261124-v65";
+const APP_BUILD = "20261126-v66";
 function registerServiceWorkerLater() {
   if (!("serviceWorker" in navigator)) return;
   const run = async () => {
     try {
-      const reg = await navigator.serviceWorker.register("./sw.js?v=65", { updateViaCache: "none" });
+      const reg = await navigator.serviceWorker.register("./sw.js?v=66", { updateViaCache: "none" });
       try { await reg.update(); } catch {}
       if (reg.waiting) {
         try { reg.waiting.postMessage({ type: "SKIP_WAITING" }); } catch {}
@@ -1100,12 +1109,7 @@ function carryClientDetails(next, prev) {
         || prevItems.find(x => x && x.name === it.name);
       return pi ? { ...pi, ...it } : it;
     });
-    // 伝票で追加した品目が、台帳側に無いだけで消えないように残す
-    prevItems.forEach(pi => {
-      if (!pi) return;
-      const exists = nextItems.some(it => it && ((pi.code && it.code === pi.code) || (pi.name && it.name === pi.name)));
-      if (!exists) nextItems.push(pi);
-    });
+    // 品目の追加は共有マスタ／伝票側を正とする（台帳の不完全な手元リストで旧品目を付け戻さない）
     cl.items = nextItems;
   }
 }
@@ -1454,7 +1458,8 @@ const state = {
   cycles: {},
   custGroup: null, // 入力画面で選んでいるグループ（null=未設定→客先から決める、""=すべて）
   photoMemosByCustomer: {}, // 客先名 → [{ id, dataUrl, takenAt }]（選んでいる客先だけの写真）
-  photoView: null // 拡大表示中の dataUrl
+  photoView: null, // 拡大表示中の dataUrl
+  paperScan: null // { busy, progress, imageUrl, rows:[{name,qty,raw}] }
 };
 
 const PHOTO_MEMO_MAX = 3;
@@ -1462,6 +1467,198 @@ const PHOTO_MAX_EDGE = 960;
 const PHOTO_JPEG_Q = 0.55;
 /** data URL の目安上限（Firestore 1ドキュメント約1MB制限対策。1枚1ドキュメントでも余裕を持つ） */
 const PHOTO_DATAURL_MAX = 220000;
+
+/** 手書き台帳（点数列）OCR用。客先の品目順＝紙の行順が前提 */
+let _tesseractLoading = null;
+async function ensureTesseract() {
+  if (window.Tesseract) return window.Tesseract;
+  if (_tesseractLoading) return _tesseractLoading;
+  _tesseractLoading = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+    s.async = true;
+    s.onload = () => resolve(window.Tesseract);
+    s.onerror = () => reject(new Error("OCRライブラリの読込に失敗しました"));
+    document.head.appendChild(s);
+  });
+  return _tesseractLoading;
+}
+function loadImageFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("画像を開けませんでした"));
+    img.src = url;
+  });
+}
+function parseOcrDigits(text) {
+  const raw = String(text || "").replace(/[OoＤＤ]/g, "0").replace(/[Il|]/g, "1").replace(/[^\d]/g, "");
+  if (!raw) return { qty: "", raw: String(text || "").trim() };
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return { qty: "", raw };
+  return { qty: String(n), raw };
+}
+/** 紙レイアウト想定: タイトル+見出しのあと品目行。点数は品名の右隣列 */
+async function ocrPaperTensuFromDataUrl(dataUrl, itemNames, onProgress) {
+  const Tesseract = await ensureTesseract();
+  const img = await loadImageFromUrl(dataUrl);
+  const maxW = 1600;
+  const scale = img.width > maxW ? maxW / img.width : 1;
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const full = document.createElement("canvas");
+  full.width = w;
+  full.height = h;
+  const fctx = full.getContext("2d");
+  fctx.drawImage(img, 0, 0, w, h);
+
+  const n = itemNames.length;
+  // 上2行（客先名・見出し）＋品目n行
+  const topFrac = 2 / (2 + Math.max(n, 1));
+  const bodyTop = Math.round(h * topFrac);
+  const bodyH = Math.max(1, h - bodyTop);
+  const rowH = bodyH / n;
+  // Excel列幅比: 品名≈0.30 / 点数≈0.18（A〜EのうちB）
+  const tensuX = Math.round(w * 0.30);
+  const tensuW = Math.max(24, Math.round(w * 0.18));
+
+  const worker = await Tesseract.createWorker("eng", 1, {
+    logger: m => {
+      if (m && m.status === "recognizing text" && onProgress) onProgress(m.progress || 0);
+    }
+  });
+  await worker.setParameters({
+    tessedit_char_whitelist: "0123456789",
+    classify_bln_numeric_mode: "1"
+  });
+
+  const rows = [];
+  try {
+    for (let i = 0; i < n; i++) {
+      if (onProgress) onProgress(i / n);
+      const y = Math.round(bodyTop + i * rowH);
+      const hh = Math.max(12, Math.round(rowH * 0.82));
+      const padY = Math.round(rowH * 0.09);
+      const cell = document.createElement("canvas");
+      // OCRしやすいよう拡大
+      const zoom = 3;
+      cell.width = tensuW * zoom;
+      cell.height = hh * zoom;
+      const cctx = cell.getContext("2d");
+      cctx.imageSmoothingEnabled = false;
+      cctx.fillStyle = "#fff";
+      cctx.fillRect(0, 0, cell.width, cell.height);
+      cctx.drawImage(full, tensuX, y + padY, tensuW, hh, 0, 0, cell.width, cell.height);
+      // 簡易二値化
+      const idata = cctx.getImageData(0, 0, cell.width, cell.height);
+      const d = idata.data;
+      for (let p = 0; p < d.length; p += 4) {
+        const g = d[p] * 0.3 + d[p + 1] * 0.59 + d[p + 2] * 0.11;
+        const v = g < 160 ? 0 : 255;
+        d[p] = d[p + 1] = d[p + 2] = v;
+      }
+      cctx.putImageData(idata, 0, 0);
+      const { data } = await worker.recognize(cell);
+      const parsed = parseOcrDigits(data && data.text);
+      rows.push({ name: itemNames[i], qty: parsed.qty, raw: parsed.raw });
+    }
+  } finally {
+    await worker.terminate();
+  }
+  return rows;
+}
+function openPaperScanPicker() {
+  if (!state.customer) {
+    toast("先に客先を選んでください", "error");
+    return;
+  }
+  if (!state.items.length) {
+    toast("この客先に品目がありません", "error");
+    return;
+  }
+  const input = document.getElementById("paper-scan-input");
+  if (!input) return;
+  input.value = "";
+  input.click();
+}
+async function startPaperScanFromFile(file) {
+  if (!file) return;
+  const names = state.items.map(it => it.name);
+  state.paperScan = { busy: true, progress: 0, imageUrl: "", rows: names.map(name => ({ name, qty: "", raw: "" })) };
+  render();
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result || ""));
+      r.onerror = () => reject(new Error("画像の読込に失敗しました"));
+      r.readAsDataURL(file);
+    });
+    state.paperScan.imageUrl = dataUrl;
+    render();
+    const rows = await ocrPaperTensuFromDataUrl(dataUrl, names, p => {
+      if (state.paperScan) {
+        state.paperScan.progress = p;
+        const el = document.getElementById("paper-scan-progress");
+        if (el) el.textContent = `読み取り中… ${Math.round(p * 100)}%`;
+      }
+    });
+    state.paperScan = { busy: false, progress: 1, imageUrl: dataUrl, rows };
+    render();
+    toast("読み取り結果を確認してください");
+  } catch (e) {
+    console.error(e);
+    state.paperScan = null;
+    render();
+    toast(e.message || "紙の読み取りに失敗しました", "error");
+  }
+}
+function applyPaperScanToItems() {
+  if (!state.paperScan || !Array.isArray(state.paperScan.rows)) return;
+  const byName = Object.fromEntries(state.paperScan.rows.map(r => [r.name, r]));
+  let filled = 0;
+  state.items = state.items.map(it => {
+    const hit = byName[it.name];
+    if (!hit) return it;
+    const q = String(hit.qty || "").trim();
+    if (!q) return { ...it, outQty: "" };
+    filled += 1;
+    return { ...it, outQty: q };
+  });
+  state.paperScan = null;
+  state.focus = null;
+  state.buffer = "";
+  render();
+  toast(filled ? `点数を ${filled} 件入れました。確認して保存してください` : "読み取れた点数がありません");
+}
+function renderPaperScanModal() {
+  const ps = state.paperScan;
+  if (!ps) return "";
+  const rows = (ps.rows || []).map((r, i) => `
+    <div class="paper-scan-row">
+      <div style="font-size:13px;font-weight:700">${esc(r.name)}</div>
+      <input type="number" inputmode="numeric" data-paper-qty="${i}" value="${esc(r.qty)}" placeholder="空" ${ps.busy ? "disabled" : ""}>
+    </div>`).join("");
+  return `
+    <div class="paper-scan-overlay" id="paper-scan-overlay">
+      <div class="paper-scan-panel" role="dialog" aria-label="紙台帳の点数読み取り">
+        <h3 style="font-size:17px;margin:0 0 6px">紙の点数を読み取り</h3>
+        <p style="font-size:12px;color:#5a7a90;margin:0 0 12px;line-height:1.5">
+          客先「${esc(state.customer)}」の品目順で点数列を読みます。1客先ぶんだけ枠に入れて撮ってください。結果は必ず確認してから反映。
+        </p>
+        <div class="paper-scan-grid">
+          <div>
+            ${ps.imageUrl ? `<img class="paper-scan-preview" src="${ps.imageUrl}" alt="撮影した紙">` : `<div class="empty" style="padding:40px">画像準備中…</div>`}
+            <div id="paper-scan-progress" style="font-size:12px;color:#0288D1;font-weight:700;margin-top:8px">${ps.busy ? `読み取り中… ${Math.round((ps.progress || 0) * 100)}%` : "確認して「数量に反映」"}</div>
+          </div>
+          <div class="paper-scan-rows">${rows}</div>
+        </div>
+        <div class="paper-scan-actions">
+          <button type="button" class="btn btn-ghost" id="paper-scan-cancel">キャンセル</button>
+          <button type="button" class="btn btn-primary" id="paper-scan-apply" ${ps.busy ? "disabled" : ""}>数量に反映</button>
+        </div>
+      </div>
+    </div>`;
+}
 
 /** いま選んでいる客先の写真メモだけ返す */
 function currentPhotoMemos() {
@@ -3524,6 +3721,8 @@ function render() {
           <div style="margin-top:8px;flex-shrink:0;display:flex;flex-direction:column;gap:6px">
             <button type="button" class="item-add-btn" id="btn-item-add" ${state.customer ? "" : "disabled"}>＋ 品目を追加</button>
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <button type="button" class="btn btn-ghost" id="btn-paper-scan" title="手書き台帳の点数をカメラで読む" ${state.customer && state.items.length ? "" : "disabled"} style="padding:6px 10px;font-size:12px;font-weight:700">📄 紙の点数</button>
+              <input type="file" id="paper-scan-input" accept="image/*" capture="environment" style="display:none">
               <button type="button" class="btn btn-ghost" id="btn-photo-memo" title="この客先の写真メモ" aria-label="写真メモ" ${state.customer ? "" : "disabled"} style="padding:6px 10px;font-size:16px;min-width:40px;opacity:.75">${currentPhotoMemos().length ? `📷${currentPhotoMemos().length}` : "📷"}</button>
               <input type="file" id="photo-memo-input" accept="image/*" capture="environment" style="display:none">
               <div class="photo-memo-thumbs">${currentPhotoMemos().map(p => `
@@ -3538,6 +3737,7 @@ function render() {
     </div>
     ${state.detail ? renderDetail(state.detail) : ""}
     ${state.invoiceMemo ? renderInvoiceMemo(state.invoiceMemo) : ""}
+    ${state.paperScan ? renderPaperScanModal() : ""}
     ${state.masterForm ? renderMasterForm() : ""}
     ${state.itemAddOpen ? renderItemAddPanel() : ""}
     ${state.photoView ? renderPhotoView() : ""}`;
@@ -3708,6 +3908,34 @@ function render() {
   if (saveBtn) saveBtn.onclick = saveLedger;
   if (issueBtn) {
     issueBtn.onclick = () => { issueToSlip(); };
+  }
+
+  const paperScanBtn = document.getElementById("btn-paper-scan");
+  const paperScanInput = document.getElementById("paper-scan-input");
+  if (paperScanBtn && paperScanInput) {
+    paperScanBtn.onclick = () => openPaperScanPicker();
+    paperScanInput.onchange = async () => {
+      const file = paperScanInput.files && paperScanInput.files[0];
+      if (!file) return;
+      await startPaperScanFromFile(file);
+      paperScanInput.value = "";
+    };
+  }
+  if (state.paperScan) {
+    const cancel = document.getElementById("paper-scan-cancel");
+    if (cancel) cancel.onclick = () => { state.paperScan = null; render(); };
+    const apply = document.getElementById("paper-scan-apply");
+    if (apply) apply.onclick = () => {
+      document.querySelectorAll("[data-paper-qty]").forEach(inp => {
+        const i = +inp.dataset.paperQty;
+        if (state.paperScan.rows[i]) state.paperScan.rows[i].qty = String(inp.value || "").trim();
+      });
+      applyPaperScanToItems();
+    };
+    const overlay = document.getElementById("paper-scan-overlay");
+    if (overlay) overlay.onclick = e => {
+      if (e.target === overlay && !state.paperScan.busy) { state.paperScan = null; render(); }
+    };
   }
 
   const photoBtn = document.getElementById("btn-photo-memo");
